@@ -165,6 +165,13 @@ class Config(BaseSettings):
     # --- Embeddings (local Ollama) ------------------------------------------
     EMBEDDING_BASE_URL: str = "http://ollama:11434"
     EMBEDDING_MODEL: str = "nomic-embed-text"
+    # nomic-embed-text is 768-dimensional. Declared rather than inferred so a
+    # model swap that silently changes dimensionality fails loudly instead of
+    # poisoning the graph with vectors that cannot be compared to the old ones.
+    EMBEDDING_DIM: int = Field(default=768, ge=1)
+    EMBEDDING_BATCH_SIZE: int = Field(default=32, ge=1)
+    EMBEDDING_CACHE_PATH: str = "data/cache/embeddings.db"
+    EMBEDDING_CACHE_ENABLED: bool = True
 
     # --- Knowledge graph (local Neo4j) --------------------------------------
     NEO4J_URI: str = "bolt://neo4j:7687"

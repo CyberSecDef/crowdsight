@@ -46,7 +46,7 @@ The application must communicate with **these and only these**:
 | Purpose | Endpoint | Protocol |
 |---|---|---|
 | LLM chat completions | `http://ollama:11434/v1` | OpenAI-compatible HTTP |
-| Text embeddings | `http://ollama:11434/api/embeddings` | Ollama native HTTP |
+| Text embeddings | `http://ollama:11434/api/embed` | Ollama native HTTP |
 | Knowledge graph | `bolt://neo4j:7687` | Bolt |
 | Simulation state | local SQLite files under `./data/simulations/` | filesystem |
 | Backend API | `http://localhost:5000` | HTTP, bound to loopback/LAN |
@@ -170,8 +170,22 @@ Configuration added here: `LLM_TIMEOUT` (300 s), `LLM_CONNECT_TIMEOUT` (10 s), `
 
 Provide `retry_sync` alongside `retry_async`: the Neo4j driver in Step 4 is synchronous.
 
-**Step 3: Embedding service**
+**Step 3: Embedding service** ✅
 Build `backend/app/storage/embedding_service.py` calling Ollama's embeddings endpoint with `nomic-embed-text`, returning 768-dim vectors. Implement batching and an on-disk cache keyed by content hash — re-embedding unchanged chunks across runs is pure waste.
+
+**Use `/api/embed`, not `/api/embeddings`.** The older endpoint takes a single `prompt` and cannot batch at all, so "batching" against it would mean only client-side concurrency. `/api/embed` accepts an `input` array and returns `{"embeddings": [[...], ...]}` — one round trip for a whole batch. Verified against a live Ollama: two inputs in, two 768-dim vectors out. The allowlist row above is corrected accordingly; same host and port, so the sealed perimeter is unchanged. Read the legacy `{"embedding": [...]}` shape defensively as a fallback.
+
+**Cache in SQLite**, one file at `data/cache/embeddings.db`, not one file per vector — tens of thousands of tiny files strain the filesystem and make pruning a directory walk. Store vectors as raw float32 blobs: ~3 KB each against ~15 KB as JSON, which at 100,000 chunks is 300 MB versus 1.5 GB. Enable WAL so a simulation process can read while the API process writes, and run SQLite calls in a worker thread rather than blocking the event loop while four in-flight embeds wait on the GPU.
+
+**Key on `sha256(model|dim|text)`.** The model and dimension belong *in* the key, not merely stored beside it: swapping `nomic-embed-text` for another model must miss, never return a vector from a different vector space where cosine similarity is meaningless.
+
+**Quantise fresh vectors to float32 before returning them.** Otherwise a vector's value depends on whether it came from the server or the cache, and similarity thresholds shift silently between the first run and every later one. Embedding models emit float32 anyway, so nothing is lost.
+
+Validate dimensionality on every response and fail loudly on mismatch — `EMBEDDING_DIM` is declared rather than inferred so a model swap cannot quietly poison the graph with vectors that cannot be compared to the existing ones. Deduplicate within a single call: chunk overlap means the same sentence recurs constantly.
+
+Configuration added here: `EMBEDDING_DIM` (768), `EMBEDDING_BATCH_SIZE` (32), `EMBEDDING_CACHE_PATH`, `EMBEDDING_CACHE_ENABLED`.
+
+**API note.** Let an explicitly passed `cache=None` mean "no cache", distinct from the argument being omitted. Collapsing the two makes caching impossible to disable and leaks a shared on-disk cache into anything that tries — including tests, where it silently carries state between cases.
 
 **Step 4: Neo4j storage layer**
 Build `backend/app/storage/neo4j_storage.py` (connection pooling, session management, parameterised Cypher only — never string interpolation) and `neo4j_schema.py` (constraints and indexes: uniqueness on entity UUID, index on entity type and name, vector index on the embedding property if the Neo4j version supports it, otherwise cosine similarity computed in-process).

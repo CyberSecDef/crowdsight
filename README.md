@@ -47,7 +47,7 @@ and packages), after which the stack runs sealed.
 | Purpose | Endpoint | Protocol |
 |---|---|---|
 | LLM chat completions | `http://ollama:11434/v1` | OpenAI-compatible HTTP |
-| Text embeddings | `http://ollama:11434/api/embeddings` | Ollama native HTTP |
+| Text embeddings | `http://ollama:11434/api/embed` | Ollama native HTTP |
 | Knowledge graph | `bolt://neo4j:7687` | Bolt |
 | Simulation state | `./data/simulations/` | local filesystem |
 | Backend API | `http://localhost:5000` | HTTP (loopback/LAN) |
@@ -305,6 +305,10 @@ docker compose exec backend python -m app.config
 | `LLM_RETRY_BASE_DELAY` / `LLM_RETRY_MAX_DELAY` | `1.0` / `30.0` seconds |
 | `EMBEDDING_BASE_URL` | `http://ollama:11434` |
 | `EMBEDDING_MODEL` | `nomic-embed-text` |
+| `EMBEDDING_DIM` | `768` |
+| `EMBEDDING_BATCH_SIZE` | `32` |
+| `EMBEDDING_CACHE_PATH` | `data/cache/embeddings.db` |
+| `EMBEDDING_CACHE_ENABLED` | `true` |
 | `NEO4J_URI` | `bolt://neo4j:7687` |
 | `NEO4J_USER` | `neo4j` |
 | `NEO4J_PASSWORD` | **none — you must set this** |
