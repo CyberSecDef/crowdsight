@@ -29,7 +29,7 @@ Sized against the reference target (Ryzen 9 8940HX, 32 threads, 61 GB RAM, RTX 5
 
 ## Software requirements
 
-- **Python 3.12** — pin exactly. Not 3.13/3.14: the CAMEL/OASIS dependency tree lags. The reference host runs system Python 3.14, so the backend **must** be containerised or run in a pinned 3.12 virtualenv.
+- **Python 3.11** — pin exactly. This spec originally said 3.12, which is wrong: every published version of `camel-oasis`, including the pinned 0.2.5, declares `Requires-Python <3.12`, so 3.12 cannot install the simulation engine at all. `camel-ai==0.2.78` allows `<3.13`. 3.11 is the only version satisfying both. Verified by building the image: Python 3.11.15 with `camel-ai` 0.2.78 and `camel-oasis` 0.2.5 installed cleanly. The reference host runs system Python 3.14, so the backend **must** be containerised or run in a pinned 3.11 virtualenv.
 - **Node.js 20 LTS+** and npm — frontend build only.
 - **Docker Engine 24+** and Docker Compose v2.
 - **Ollama 0.30+** — serves both chat completions and embeddings on `:11434`.
@@ -99,8 +99,28 @@ Hostnames must never be resolved during this check: DNS can point anywhere, and 
 
 This is a deliberate inversion of the upstream project, which rejected self-hosted memory URLs; here we reject *non*-local ones.
 
-**Step 3: Sealed container networking**
-Write `docker-compose.yml` defining four services — `ollama`, `neo4j`, `backend`, `frontend` — on a single user-defined bridge network declared `internal: true`, which removes the default gateway and makes egress impossible. Ollama gets GPU passthrough via `deploy.resources.reservations.devices` (or `--gpus all`). Neo4j gets a named volume plus `NEO4J_AUTH` and heap settings. Publish only the frontend and backend ports to the host; Neo4j and Ollama stay unpublished and reachable only by service name.
+**Step 3: Sealed container networking** ✅
+Write `docker-compose.yml` defining `ollama`, `neo4j`, `backend` and `frontend` on a user-defined bridge network declared `internal: true`, which removes the default gateway and makes egress impossible. Ollama gets GPU passthrough via `deploy.resources.reservations.devices` (or `--gpus all`). Neo4j gets a named volume plus `NEO4J_AUTH` and heap settings.
+
+**Correction, established empirically on Docker 29.7.1.** This step originally said to publish the backend and frontend ports directly from the sealed network. That is not implementable: *a container on an `internal: true` network cannot be reached from the host at all.* A published port on such a network is simply unreachable — verified with a plain `nginx` service, which returned no response on `localhost:PORT` and also failed when the publish was bound explicitly to `127.0.0.1`. Reachability and egress turn out to be the same property, so publishing a port directly from `backend` would require putting the backend on a routable network and would defeat the entire design.
+
+The topology therefore needs a fifth service, a **gateway**: a stateless nginx reverse proxy attached to both networks, holding no application code, no credentials and no data, publishing `:8080` (UI, plus `/api/` proxied) and `:5000` (direct API). It is the single acknowledged boundary. Everything that touches a document, the knowledge graph, an LLM prompt or simulation data stays on the sealed network with no route off-host.
+
+```
+host :8080 / :5000
+      |
+[ gateway ]  <- edge network, the ONLY container with a route off-host
+      |
+======|====== sealed network (internal: true) ==========
+      |
+[ frontend ] [ backend ] --> [ ollama ] [ neo4j ]
+```
+
+Harden the edge network with `com.docker.network.bridge.enable_ip_masquerade: "false"`, which removes NAT for the gateway's outbound TCP while leaving port publishing intact (verified: published port answers 200, outbound TCP times out). Note the residual channel honestly — Docker's embedded resolver still answers *external DNS queries* for non-internal networks, so the gateway can resolve names even though it cannot open a connection. The guarantee is absolute only on the sealed network, which is where the egress verification suite must assert it.
+
+Bind the published ports to `127.0.0.1` by default. There is no authentication in front of this stack; exposing it to the LAN should be a deliberate act (`CROWDSIGHT_BIND=0.0.0.0`).
+
+Gate the `frontend` service behind a compose profile until Phase 9 builds it, and have the gateway serve a placeholder page on `502` so `docker compose up -d` works from Phase 1 onward. Resolve nginx upstreams at request time via `resolver 127.0.0.11` — otherwise nginx refuses to start whenever an upstream container is absent.
 
 Because an internal network blocks model pulls, provide a separate `docker-compose.provision.yml` overlay that temporarily attaches Ollama to a normal bridge network for one-time `ollama pull` operations. Document that this overlay must never be used at runtime.
 

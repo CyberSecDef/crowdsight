@@ -1,0 +1,28 @@
+# CrowdSight — provisioning overlay. NEVER use this at runtime.
+#
+# The sealed network has no route off-host, which also means `ollama pull`
+# cannot fetch model weights. This overlay temporarily attaches Ollama to a
+# routable bridge network for that one-time operation, and nothing else.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.provision.yml up -d ollama
+#   docker compose exec ollama ollama pull qwen2.5:14b
+#   docker compose exec ollama ollama pull nomic-embed-text
+#   docker compose -f docker-compose.yml -f docker-compose.provision.yml down
+#
+# Then start normally with `docker compose up -d` and confirm the seal is back:
+#
+#   docker compose exec backend python -m app.egress_check
+#
+# While this overlay is active the "nothing leaves the network" property does
+# not hold. Ollama can reach the internet, by design, for as long as it takes
+# to pull the weights. Bring it down as soon as the pull finishes.
+
+services:
+  ollama:
+    networks:
+      sealed: {}
+      provisioning: {}
+
+networks:
+  provisioning:
+    driver: bridge

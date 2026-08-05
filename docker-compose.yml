@@ -1,17 +1,180 @@
 # CrowdSight — sealed service stack
 #
-# SCAFFOLD ONLY. Written in full by Phase 1, Step 3 ("Sealed container
-# networking"), which defines the four services on a single user-defined bridge
-# network declared `internal: true` — no default gateway, so egress is
-# structurally impossible rather than merely unconfigured.
+# TOPOLOGY
 #
-# Planned shape:
-#   services: ollama (GPU passthrough, unpublished)
-#             neo4j  (named volume, NEO4J_AUTH, heap settings, unpublished)
-#             backend  -> publishes 5000
-#             frontend -> publishes 8080
-#   networks: internal: {internal: true}
+#   host :8080 / :5000
+#         |
+#   [ gateway ]  <- edge network, the ONLY container with a route off-host
+#         |
+#   ======|====== sealed network (internal: true, no default gateway) ========
+#         |
+#   [ frontend ] [ backend ] --> [ ollama ]  [ neo4j ]
 #
-# Model pulls require a routable network and therefore a separate
-# docker-compose.provision.yml overlay. That overlay must never be used at
-# runtime.
+# Everything that touches a document, the knowledge graph, an LLM prompt, or
+# simulation data lives on `sealed` and cannot reach the internet — verified,
+# not asserted: containers there have no default route, DNS returns SERVFAIL,
+# and connections to a raw IP fail with "Network unreachable".
+#
+# WHY A GATEWAY EXISTS
+#
+# A container on an `internal: true` network cannot be reached from the host
+# either — published ports simply do not work there, including when bound to
+# 127.0.0.1. Reachability and egress are the same property, so publishing a
+# port directly from `backend` would give the backend a route to the internet
+# and defeat the entire design. The gateway resolves that: it is a stateless
+# nginx reverse proxy holding no application code, no credentials and no data,
+# and it is the single acknowledged boundary.
+#
+# The edge network additionally disables IP masquerade, so the gateway has no
+# NAT for outbound TCP. Note the residual channel: Docker's embedded resolver
+# still answers external DNS queries for non-internal networks, so the gateway
+# can perform lookups even though it cannot open a connection. Phase 10's
+# egress verification suite asserts against the sealed containers, where the
+# guarantee is absolute.
+
+services:
+  # --- Inference -----------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: crowdsight-ollama
+    restart: unless-stopped
+    networks: [sealed]
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      # Keep the model resident between agent turns; reloading a 14b model
+      # per request would dominate a multi-thousand-completion run.
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_HOST: "0.0.0.0:11434"
+    # GPU passthrough. Requires the NVIDIA Container Toolkit on the host:
+    #   sudo apt install -y nvidia-container-toolkit
+    #   sudo nvidia-ctk runtime configure --runtime=docker
+    #   sudo systemctl restart docker
+    # Without it this service fails to start. That is deliberate — CPU-only
+    # inference is impractical for multi-hundred-agent runs, and silently
+    # falling back to it turns an overnight job into a multi-day one.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # --- Knowledge graph -----------------------------------------------------
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: crowdsight-neo4j
+    restart: unless-stopped
+    networks: [sealed]
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}"
+      # Conservative defaults sized for a 32 GB host. Raise the heap for
+      # graphs beyond ~10k nodes; see the operational notes in README.md.
+      NEO4J_server_memory_heap_initial__size: "${NEO4J_HEAP_INITIAL:-2G}"
+      NEO4J_server_memory_heap_max__size: "${NEO4J_HEAP_MAX:-4G}"
+      NEO4J_server_memory_pagecache_size: "${NEO4J_PAGECACHE:-2G}"
+      NEO4J_db_logs_query_enabled: "OFF"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # --- Application ---------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crowdsight-backend:dev
+    container_name: crowdsight-backend
+    restart: unless-stopped
+    networks: [sealed]
+    env_file:
+      - .env
+    environment:
+      # Service names, not loopback: inside the sealed network these resolve
+      # via Docker's embedded DNS and nothing else does.
+      LLM_BASE_URL: "http://ollama:11434/v1"
+      EMBEDDING_BASE_URL: "http://ollama:11434"
+      NEO4J_URI: "bolt://neo4j:7687"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/api/health/live', timeout=5).status==200 else 1)\""]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    # Phase 9 builds this. Until then it is profile-gated, so
+    # `docker compose up -d` brings up the other services and the gateway
+    # serves a placeholder at / instead of proxying here.
+    build:
+      context: ./frontend
+    image: crowdsight-frontend:dev
+    container_name: crowdsight-frontend
+    restart: unless-stopped
+    profiles: [frontend]
+    networks: [sealed]
+    depends_on:
+      - backend
+
+  # --- Ingress -------------------------------------------------------------
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: crowdsight-gateway
+    restart: unless-stopped
+    networks: [edge, sealed]
+    ports:
+      # Bound to loopback by default. Set CROWDSIGHT_BIND=0.0.0.0 in .env to
+      # expose the UI to the LAN, and understand that you are then trusting
+      # every host on it — there is no authentication in front of this.
+      - "${CROWDSIGHT_BIND:-127.0.0.1}:8080:8080"
+      - "${CROWDSIGHT_BIND:-127.0.0.1}:5000:5000"
+    volumes:
+      - ./docker/gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/gateway/placeholder.html:/usr/share/nginx/html/_placeholder.html:ro
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/_gateway/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+networks:
+  # No default gateway. Egress is structurally impossible, not merely
+  # unconfigured. Verify with:
+  #   docker network inspect crowdsight_sealed | grep -i '"Internal"'
+  sealed:
+    driver: bridge
+    internal: true
+
+  # Reachable from the host so ports can be published. Masquerade is disabled
+  # so the gateway has no NAT for outbound connections.
+  edge:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
+volumes:
+  ollama_models:
+  neo4j_data:
+  neo4j_logs:

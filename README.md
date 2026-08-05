@@ -31,6 +31,14 @@ declared `internal: true`, which removes the default gateway — rather than mer
 by configuration. The "nothing leaves the network" property is structurally enforced and
 independently verifiable, not a matter of trusting a config file.
 
+One container is deliberately outside that seal: a stateless nginx **gateway**, which
+publishes the ports and reverse-proxies into the sealed network. It exists because a
+container on an `internal: true` network cannot be reached *from the host* either —
+reachability and egress are the same property — so the alternative would be giving the
+backend itself a route to the internet. The gateway holds no application code, no
+credentials and no data. Everything that touches a document, the knowledge graph, an LLM
+prompt or simulation data stays sealed.
+
 The only step requiring internet access is one-time provisioning (pulling model weights
 and packages), after which the stack runs sealed.
 
@@ -108,8 +116,9 @@ runs.
 
 ### Software
 
-- **Python 3.12** — pinned exactly. Not 3.13/3.14; the CAMEL/OASIS dependency tree lags.
-  The backend must be containerised or run in a pinned 3.12 virtualenv.
+- **Python 3.11** — pinned exactly. Not 3.12+: every published version of `camel-oasis`
+  declares `Requires-Python <3.12`, so the simulation engine will not install on 3.12.
+  The backend must be containerised or run in a pinned 3.11 virtualenv.
 - **Node.js 20 LTS+** and npm — frontend build only.
 - **Docker Engine 24+** and Docker Compose v2.
 - **Ollama 0.30+** — serves both chat completions and embeddings on `:11434`.
@@ -125,6 +134,20 @@ Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0
 ---
 
 ## Quick start
+
+### Prerequisite: NVIDIA Container Toolkit
+
+Ollama takes the GPU by device reservation, so the toolkit must be installed or the
+`ollama` service will not start. That failure is deliberate — CPU-only inference is
+impractical for multi-hundred-agent runs, and silently falling back to it turns an
+overnight job into a multi-day one.
+
+```bash
+sudo apt install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+docker info --format '{{.Runtimes}}' | grep -q nvidia && echo "toolkit ready"
+```
 
 ### One-time provisioning (requires internet)
 
@@ -144,19 +167,33 @@ The provisioning overlay must **never** be used at runtime.
 ### Normal sealed startup
 
 ```bash
-docker compose up -d                 # internal network only — no egress
-docker compose exec backend pytest tests/test_egress_verification.py   # prove it
+docker compose up -d                 # sealed network only — no egress
+docker compose exec backend python -m app.egress_check                 # prove it
 ```
 
-Then open <http://localhost:8080>.
+Then open <http://localhost:8080>. Until Phase 9 builds the frontend, that address serves
+a placeholder and the API is the live part:
+
+```bash
+curl http://localhost:8080/api/health     # through the gateway
+curl http://localhost:5000/api/health     # direct to the API
+```
+
+Ports bind to `127.0.0.1` by default. There is no authentication in front of this stack;
+set `CROWDSIGHT_BIND=0.0.0.0` in `.env` only if you mean to expose it to your LAN. Once
+the frontend exists, bring it up with `docker compose --profile frontend up -d`.
 
 ### Verifying nothing left your network
 
 ```bash
-docker network inspect crowdsight_internal | grep -i internal    # expect: "Internal": true
-docker compose exec backend python -c "import socket; socket.create_connection(('1.1.1.1',443),3)"
-# expect failure — no route
+docker compose exec backend python -m app.egress_check   # expect: SEALED
+docker network inspect crowdsight_sealed --format '{{.Internal}}'   # expect: true
+docker port crowdsight-backend                            # expect: no output
 ```
+
+`app.egress_check` attempts TCP connections to three external addresses and DNS
+resolution of three external names from inside the backend container, and exits non-zero
+if any of them succeeds.
 
 ---
 
@@ -202,30 +239,46 @@ Document ─▶ Parse & chunk ─▶ Ontology ─▶ NER extraction ─▶ Neo4j
                                              Interviews (IPC)          Grounded report
 ```
 
-| Layer | Component |
-|---|---|
-| Inference | Ollama (`qwen2.5:14b`, `nomic-embed-text`) |
-| Graph memory | Neo4j 5.15+ over Bolt |
-| Simulation | CAMEL-AI OASIS (Apache 2.0), one OS process per run |
-| Run state | SQLite under `data/simulations/<sim_id>/` |
-| API | Flask |
-| UI | Vue 3 + Vite, Cytoscape.js / vis-network |
+| Layer | Component | Network |
+|---|---|---|
+| Ingress | nginx reverse proxy, stateless | `edge` (publishes `:8080`, `:5000`) |
+| Inference | Ollama (`qwen2.5:14b`, `nomic-embed-text`) | `sealed` |
+| Graph memory | Neo4j 5.15+ over Bolt | `sealed` |
+| Simulation | CAMEL-AI OASIS (Apache 2.0), one OS process per run | `sealed` |
+| Run state | SQLite under `data/simulations/<sim_id>/` | `sealed` |
+| API | Flask | `sealed` |
+| UI | Vue 3 + Vite, Cytoscape.js / vis-network | `sealed` |
+
+```
+host :8080 / :5000
+      |
+[ gateway ]  <- edge network, the only container with a route off-host
+      |
+======|====== sealed network (internal: true, no default gateway) ======
+      |
+[ frontend ] [ backend ] --> [ ollama ] [ neo4j ]
+```
 
 ### Repository layout
 
 ```
 backend/
   app/
-    api/          # graph, simulation, report routes
-    services/     # ontology, graph builder, profiles, config, runner, report agent
-    storage/      # neo4j, embeddings, NER, search
-    utils/        # llm client, retry, file parser
-    config.py     # single source of truth; validate() rejects off-host URLs
+    api/              # graph, simulation, report routes
+    services/         # ontology, graph builder, profiles, config, runner, report agent
+    storage/          # neo4j, embeddings, NER, search
+    utils/            # llm client, retry, file parser
+    config.py         # single source of truth; rejects off-host endpoints
+    main.py           # Flask entrypoint + health
+    egress_check.py   # proves the seal from inside the container
   tests/
+  requirements.txt
 frontend/src/
+docker/gateway/       # nginx reverse-proxy config + placeholder page
 data/{uploads,graphs,simulations,reports}
 docker-compose.yml
 docker-compose.provision.yml
+Dockerfile
 ```
 
 ---

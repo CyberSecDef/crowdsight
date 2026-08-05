@@ -1,17 +1,44 @@
-# CrowdSight backend image
+# CrowdSight backend image.
 #
-# SCAFFOLD ONLY. Fleshed out alongside Phase 1, Step 3.
-#
-# Python 3.12 is pinned exactly and deliberately: the CAMEL/OASIS dependency
-# tree lags 3.13/3.14, and the reference host runs system Python 3.14. That
-# mismatch is the reason the backend is containerised at all — do not relax the
-# pin to match the host.
+# Python 3.11, pinned deliberately. The spec originally called for 3.12, but
+# every published version of camel-oasis (including the pinned 0.2.5) declares
+# Requires-Python <3.12 — so 3.12 cannot install the simulation engine at all.
+# camel-ai 0.2.78 allows <3.13. 3.11 is the only version satisfying both.
+# The reference host runs system Python 3.14, which is why this is
+# containerised rather than run from a host virtualenv.
 
-FROM python:3.12-slim
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-# TODO(Step 3): copy backend/requirements.txt, pip install, copy source,
-# create a non-root user, expose 5000, and set the entrypoint.
+# Build toolchain for packages without wheels; removed in the same layer so it
+# does not survive into the image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-CMD ["python", "-c", "print('CrowdSight backend scaffold — not yet implemented')"]
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install -r requirements.txt \
+    && apt-get purge -y --auto-remove build-essential
+
+COPY backend/ /app/
+
+# Match the host UID so the bind-mounted ./data stays writable. Override at
+# build time with --build-arg UID=$(id -u) if yours differs.
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g "${GID}" crowdsight 2>/dev/null || true \
+    && useradd -u "${UID}" -g "${GID}" -m -s /usr/sbin/nologin crowdsight 2>/dev/null || true \
+    && mkdir -p /app/data \
+    && chown -R "${UID}:${GID}" /app
+
+USER ${UID}:${GID}
+
+EXPOSE 5000
+
+CMD ["python", "-m", "app.main"]

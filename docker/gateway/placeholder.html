@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CrowdSight — frontend not running</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 40rem; margin: 12vh auto; padding: 0 1.5rem; }
+  code { background: #8881; padding: .15em .4em; border-radius: .25em; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  p.sub { color: #888; margin-top: 0; }
+</style>
+<h1>CrowdSight gateway is up</h1>
+<p class="sub">The frontend is not running.</p>
+<p>
+  The Vue application is built in Phase 9. Until then the <code>frontend</code>
+  service is profile-gated, and this page stands in for it.
+</p>
+<p>The API is reachable now, both through this gateway and directly:</p>
+<pre><code>curl http://localhost:8080/api/health
+curl http://localhost:5000/api/health</code></pre>
+<p>
+  Once the frontend exists, start it with
+  <code>docker compose --profile frontend up -d</code>.
+</p>
