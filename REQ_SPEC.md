@@ -34,7 +34,7 @@ Sized against the reference target (Ryzen 9 8940HX, 32 threads, 61 GB RAM, RTX 5
 - **Docker Engine 24+** and Docker Compose v2.
 - **Ollama 0.30+** — serves both chat completions and embeddings on `:11434`.
 - **Neo4j Community Edition 5.15+** — knowledge graph and agent memory store.
-- **Python packages** — `flask>=3.0`, `flask-cors>=6.0`, `openai>=1.0` (SDK only, pointed at Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0`, `PyMuPDF>=1.24`, `python-dotenv>=1.0`, `httpx>=0.27`, `charset-normalizer`, `chardet`.
+- **Python packages** — `flask>=3.0`, `flask-cors>=6.0`, `openai>=1.0` (SDK only, pointed at Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0`, `pydantic-settings>=2.2`, `PyMuPDF>=1.24`, `python-dotenv>=1.0`, `httpx>=0.27`, `charset-normalizer`, `chardet`.
 - **Test packages** — `pytest`, `pytest-asyncio`, `pytest-cov`, `responses` or `respx` for HTTP mocking, `testcontainers` (optional, for ephemeral Neo4j in integration tests).
 - **Ollama models** — `qwen2.5:14b` (reasoning/generation) and `nomic-embed-text` (768-dim embeddings). Optionally `qwen2.5:32b` for higher-VRAM hosts.
 - **Frontend** — Vue 3 + Vite, a graph visualisation library (Cytoscape.js or vis-network), and a charting library.
@@ -52,7 +52,9 @@ The application must communicate with **these and only these**:
 | Backend API | `http://localhost:5000` | HTTP, bound to loopback/LAN |
 | Frontend | `http://localhost:5173` (dev) / `:8080` (prod) | HTTP |
 
-Any other outbound destination is a defect. There is no API key to a third party anywhere in this system; `LLM_API_KEY` exists solely because the OpenAI SDK requires a non-empty string, and its value must be the literal `ollama`.
+The service names above are the preferred form, and loopback (`localhost`, `127.0.0.1`, `::1`) is equally acceptable when running outside Compose. A private LAN address — RFC 1918, link-local, or unique-local — is **permitted where genuinely necessary**, for example when Ollama runs on a separate GPU box, but it is a second-best arrangement and the configuration layer must say so out loud: traffic to another host on the LAN still leaves this machine, and the container-level egress seal cannot cover it. Public addresses and public hostnames are refused outright.
+
+Any other outbound destination is a defect. There is no API key to a third party anywhere in this system. `LLM_API_KEY` exists because the OpenAI SDK requires a non-empty string; it defaults to the literal `ollama`, which Ollama ignores. It is settable so that a local OpenAI-compatible gateway in front of Ollama (LiteLLM, vLLM) can be given a token — a value that, like everything else here, never leaves the perimeter.
 
 ---
 
@@ -76,12 +78,26 @@ Any other outbound destination is a defect. There is no API key to a third party
 ### Phase 1: Foundation, sealed networking, and the configuration contract
 
 **Step 1: Repository scaffold** ✅
-Create the project skeleton: `backend/app/{api,services,storage,utils,models}`, `backend/tests`, `frontend/src`, `data/{uploads,graphs,simulations,reports}`, plus `docker-compose.yml`, `Dockerfile`, `.env.example`, `README.md`. Initialise git. Add a `.gitignore` covering `.env`, `data/`, `__pycache__`, `node_modules`, and `*.db`.
+Create the project skeleton: `backend/app/{api,services,storage,utils,models}`, `backend/tests`, `frontend/src`, `data/{uploads,graphs,simulations,reports}`, plus `docker-compose.yml`, `Dockerfile`, `backend/requirements.txt`, `backend/requirements-dev.txt`, `.env.example`, `README.md`. Initialise git. Add a `.gitignore` covering `.env`, `data/`, `__pycache__`, `node_modules`, and `*.db`.
 
 **Step 2: The configuration module** ✅
-Build `backend/app/config.py` as the single source of truth. It reads environment variables, applies defaults, and exposes a `validate()` classmethod. Required settings: `LLM_BASE_URL` (default `http://ollama:11434/v1`), `LLM_MODEL_NAME` (default `qwen2.5:14b`), `LLM_API_KEY` (default `ollama`), `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL` (default `nomic-embed-text`), `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `MAX_ROUNDS` (default 10), `MAX_AGENTS` (default 100), `REPORT_TEMPERATURE` (default 0.5), `CHUNK_SIZE` (default 500), `CHUNK_OVERLAP` (default 50), `MAX_CONTENT_LENGTH` (50 MB), `ALLOWED_EXTENSIONS` (`pdf, md, txt, markdown`).
+Build `backend/app/config.py` as the single source of truth, using `pydantic-settings`. `Config` subclasses `BaseSettings`: every setting is a typed field bound to the environment variable of the same name, given a local-only default, and constrained declaratively (`ge`, `le`) rather than by hand. Constructing `Config` *is* validating it — pydantic runs field validators and `@model_validator(mode="after")` checks in one pass and reports every failure together. Expose `get_config()` for the process-wide singleton and `reload_config()` to re-read the environment; both raise a typed `ConfigError` rather than leaking pydantic's `ValidationError`, so callers depend on this module's contract instead of pydantic's. (The name `validate` is reserved — `BaseModel.validate` is a deprecated pydantic v1 method — hence `get_config`/`reload_config`.)
 
-Critically, `validate()` must **reject any configuration pointing off-host**. Parse `LLM_BASE_URL`, `EMBEDDING_BASE_URL` and `NEO4J_URI`; if the hostname is not in the allowlist (`localhost`, `127.0.0.1`, `ollama`, `neo4j`, or an operator-supplied `ALLOWED_HOSTS` list), raise and refuse to start. This is a deliberate inversion of the upstream project, which rejected self-hosted memory URLs; here we reject *non*-local ones.
+Settings: `LLM_BASE_URL` (default `http://ollama:11434/v1`), `LLM_MODEL_NAME` (default `qwen2.5:14b`), `LLM_API_KEY` (`SecretStr`, default `ollama`), `LLM_CONCURRENCY` (default 4), `EMBEDDING_BASE_URL` (default `http://ollama:11434`), `EMBEDDING_MODEL` (default `nomic-embed-text`), `NEO4J_URI` (default `bolt://neo4j:7687`), `NEO4J_USER` (default `neo4j`), `NEO4J_PASSWORD` (`SecretStr`, no default — an operator must choose one), `MAX_ROUNDS` (default 10), `MAX_AGENTS` (default 100), `REPORT_TEMPERATURE` (default 0.5), `CHUNK_SIZE` (default 500), `CHUNK_OVERLAP` (default 50), `MAX_CONTENT_LENGTH` (50 MB), `ALLOWED_EXTENSIONS` (`pdf, md, txt, markdown`), `ALLOWED_HOSTS` (empty).
+
+Critically, a model validator must **reject any configuration pointing off-host**. Parse `LLM_BASE_URL`, `EMBEDDING_BASE_URL` and `NEO4J_URI`, and classify each hostname:
+
+| Class | Examples | Behaviour |
+|---|---|---|
+| Loopback | `localhost`, `127.0.0.1`, `::1` | Accept silently — **preferred** |
+| Compose service name | `ollama`, `neo4j` | Accept silently — the default deployment |
+| Private / link-local | `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, `fc00::/7`, `fe80::/10` | Accept **with a `PerimeterWarning`** — allowed where genuinely needed, never the default |
+| Operator opt-in | any name in `ALLOWED_HOSTS` | Accept with a warning noting that names are never resolved |
+| Public | `api.openai.com`, `1.1.1.1`, `neo4j+s://…databases.neo4j.io` | **Refuse to start** |
+
+Hostnames must never be resolved during this check: DNS can point anywhere, and a guarantee that depends on what a resolver returns today is not a guarantee. A name is trusted only if it is a known service name or an explicit opt-in; IP literals are judged by the address itself. Warnings are collected on `Config.perimeter_notes` as well as raised through `warnings.warn`, so startup logging and the health endpoint can both surface them. Validate the URI scheme too (`http`/`https` for the LLM and embedding endpoints, `bolt`/`neo4j` and their `+s`/`+ssc` variants for Neo4j) — a cloud Neo4j Aura URI must fail on the host check, not slip through because the scheme looked plausible.
+
+This is a deliberate inversion of the upstream project, which rejected self-hosted memory URLs; here we reject *non*-local ones.
 
 **Step 3: Sealed container networking**
 Write `docker-compose.yml` defining four services — `ollama`, `neo4j`, `backend`, `frontend` — on a single user-defined bridge network declared `internal: true`, which removes the default gateway and makes egress impossible. Ollama gets GPU passthrough via `deploy.resources.reservations.devices` (or `--gpus all`). Neo4j gets a named volume plus `NEO4J_AUTH` and heap settings. Publish only the frontend and backend ports to the host; Neo4j and Ollama stay unpublished and reachable only by service name.
@@ -89,7 +105,7 @@ Write `docker-compose.yml` defining four services — `ollama`, `neo4j`, `backen
 Because an internal network blocks model pulls, provide a separate `docker-compose.provision.yml` overlay that temporarily attaches Ollama to a normal bridge network for one-time `ollama pull` operations. Document that this overlay must never be used at runtime.
 
 **Step 4: Egress guard test unit**
-**Tests:** `tests/test_config_validation.py` — asserts `validate()` accepts localhost/service-name URLs and raises on public hostnames, raw public IPs, and `https://` schemes pointing off-box; asserts a missing required variable fails loudly rather than defaulting silently.
+**Tests:** `tests/test_config_validation.py` — asserts loopback and service-name URLs are accepted silently; that private/link-local addresses are accepted but emit a `PerimeterWarning` and populate `perimeter_notes`; that public hostnames, raw public IPs, off-box `https://` URLs, cloud Neo4j URIs and wrong schemes all raise `ConfigError`; that a missing required variable (`NEO4J_PASSWORD`) fails loudly rather than defaulting silently; and that field constraints (`MAX_ROUNDS >= 1`, `0.0 <= REPORT_TEMPERATURE <= 2.0`, `CHUNK_OVERLAP < CHUNK_SIZE`) reject bad values. Test `classify_host` directly as well — it is the smallest unit the whole guarantee rests on.
 `tests/test_network_isolation.py` — an integration test that execs inside the backend container and asserts a connection attempt to a known-external host fails (DNS resolution failure or no route). This is the test that proves the "never leaves my network" property; it must be part of CI and not skippable.
 
 ---

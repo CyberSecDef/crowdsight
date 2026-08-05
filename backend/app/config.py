@@ -1,45 +1,57 @@
 """Single source of truth for CrowdSight configuration.
 
-Every setting is read from the environment, coerced to its declared type, and
-given a local-only default. Nothing else in the codebase should call
-``os.environ`` for these values.
+Built on ``pydantic-settings``: every setting is a typed field with a
+local-only default, environment variables are bound by field name, and
+constructing :class:`Config` *is* validating it. Nothing else in the codebase
+should call ``os.environ`` for these values.
 
-The load is deliberately non-fatal: a malformed or missing value is recorded
-rather than raised at import time, so that ``python -m app.config`` can still
-report *every* problem at once instead of dying on the first one.
-:meth:`Config.validate` is what refuses startup.
+The egress guard lives here. A model validator parses ``LLM_BASE_URL``,
+``EMBEDDING_BASE_URL`` and ``NEO4J_URI`` and refuses any host outside the
+sealed perimeter. The perimeter is, in order of preference:
 
-The egress guard lives here. ``validate()`` parses ``LLM_BASE_URL``,
-``EMBEDDING_BASE_URL`` and ``NEO4J_URI`` and rejects any host outside the
-allowlist. This is a deliberate inversion of the upstream project, which
-rejected *self-hosted* memory URLs; here we reject *non-local* ones. It is the
-first of three layers enforcing the sealed-network property — the other two
-being the ``internal: true`` container network (Step 3) and the egress
-verification suite (Phase 10). A config file cannot by itself guarantee
-anything; it can only refuse to be the thing that breaks the seal.
+1. **Loopback** — ``localhost``, ``127.0.0.0/8``, ``::1``. Preferred.
+2. **Compose service names** — ``ollama``, ``neo4j``. The default deployment.
+3. **Private addresses** — RFC 1918 (``10/8``, ``172.16/12``, ``192.168/16``),
+   link-local (``169.254/16``, ``fe80::/10``), and unique-local (``fc00::/7``).
+   Permitted, but each one emits a warning: another box on the LAN is another
+   box that can be compromised, and traffic to it leaves this host.
+4. **Operator opt-in** — any hostname listed in ``ALLOWED_HOSTS``.
+
+Anything else — a public IP, a public hostname — is refused. This is a
+deliberate inversion of the upstream project, which rejected *self-hosted*
+memory URLs; here we reject *non-local* ones. It is the first of three layers
+enforcing the sealed-network property, the others being the ``internal: true``
+container network (Phase 1 Step 3) and the egress verification suite (Phase
+10). A config module cannot by itself guarantee anything; it can only refuse to
+be the thing that breaks the seal.
 """
 
 from __future__ import annotations
 
-import os
+import warnings
 from ipaddress import ip_address
-from typing import Iterable
-from urllib.parse import urlparse
+from typing import Annotated, Any, Iterable, Literal
 
-try:  # pragma: no cover - trivial import guard
-    from dotenv import load_dotenv
-except ImportError:  # python-dotenv absent (e.g. a bare scaffold checkout)
-    def load_dotenv(*_args, **_kwargs) -> bool:
-        return False
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-load_dotenv()
+__all__ = [
+    "Config",
+    "ConfigError",
+    "PerimeterWarning",
+    "classify_host",
+    "get_config",
+    "reload_config",
+]
 
 
 class ConfigError(RuntimeError):
-    """Raised by :meth:`Config.validate` when the configuration is unusable.
+    """Raised when the configuration is unusable.
 
-    Carries every problem found, not just the first, so an operator fixes one
-    round of errors rather than playing whack-a-mole through restarts.
+    Wraps pydantic's :class:`~pydantic.ValidationError` in something an
+    operator can act on, and carries every problem found rather than only the
+    first — so one round of fixes is enough instead of whack-a-mole through
+    restarts.
     """
 
     def __init__(self, errors: Iterable[str]) -> None:
@@ -49,284 +61,298 @@ class ConfigError(RuntimeError):
             f"Invalid CrowdSight configuration ({len(self.errors)} problem(s)):\n{joined}"
         )
 
+    @classmethod
+    def from_validation_error(cls, exc: ValidationError) -> "ConfigError":
+        messages = []
+        for err in exc.errors():
+            location = ".".join(str(part) for part in err["loc"]) or "(config)"
+            messages.append(f"{location}: {err['msg']}")
+        return cls(messages)
 
-# Hosts that are always reachable: loopback plus the two Compose service names.
-# Anything else must be opted into explicitly via ALLOWED_HOSTS.
-ALWAYS_ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "ollama", "neo4j"})
+
+class PerimeterWarning(UserWarning):
+    """Emitted when an endpoint is reachable but weaker than loopback."""
+
+
+# Compose service names, resolvable only on the internal network.
+SERVICE_HOSTS = frozenset({"ollama", "neo4j"})
+LOOPBACK_HOSTS = frozenset({"localhost"})
+
+HostKind = Literal["loopback", "service", "private", "allowlisted", "public"]
 
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _BOLT_SCHEMES = frozenset(
     {"bolt", "bolt+s", "bolt+ssc", "neo4j", "neo4j+s", "neo4j+ssc"}
 )
 
-_MISSING = object()
-
-# Populated during _load(); surfaced by validate(). Coercion failures land here
-# so that import never explodes and every problem is reported together.
-_LOAD_ERRORS: list[str] = []
+_API_KEY_SENTINEL = "ollama"
 
 
-def _raw(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
+def classify_host(host: str, allowed_hosts: Iterable[str] = ()) -> HostKind:
+    """Classify a hostname or IP literal against the sealed perimeter.
 
+    Hostnames are never resolved. DNS can point anywhere, and a check that
+    depends on what a resolver says today is not a guarantee — so a name is
+    trusted only if it is a known service name or an explicit operator opt-in.
+    IP literals are classified by the address itself.
+    """
+    host = host.strip().lower().strip("[]")
+    if not host:
+        return "public"
 
-def _str(name: str, default: str | object = _MISSING) -> str | None:
-    value = _raw(name)
-    if value is not None:
-        return value
-    if default is _MISSING:
-        return None  # required-but-absent; validate() reports it
-    return default  # type: ignore[return-value]
+    if host in LOOPBACK_HOSTS:
+        return "loopback"
 
-
-def _int(name: str, default: int) -> int:
-    value = _raw(name)
-    if value is None:
-        return default
     try:
-        return int(value)
+        ip = ip_address(host)
     except ValueError:
-        _LOAD_ERRORS.append(
-            f"{name} must be an integer, got {value!r} (falling back to {default})"
-        )
-        return default
+        if host in SERVICE_HOSTS:
+            return "service"
+        if host in {h.strip().lower() for h in allowed_hosts}:
+            return "allowlisted"
+        return "public"
+
+    if ip.is_loopback:
+        return "loopback"
+    # is_private covers RFC 1918, link-local, unique-local and friends.
+    if ip.is_private or ip.is_link_local:
+        return "private"
+    if host in {h.strip().lower() for h in allowed_hosts}:
+        return "allowlisted"
+    return "public"
 
 
-def _float(name: str, default: float) -> float:
-    value = _raw(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        _LOAD_ERRORS.append(
-            f"{name} must be a number, got {value!r} (falling back to {default})"
-        )
-        return default
+def _split_csv(value: Any) -> Any:
+    """Accept ``a,b,c`` from the environment for set-typed fields."""
+    if isinstance(value, str):
+        items = (item.strip().lstrip(".").lower() for item in value.split(","))
+        return {item for item in items if item}
+    return value
 
 
-def _csv(name: str, default: frozenset[str] = frozenset()) -> frozenset[str]:
-    value = _raw(name)
-    if value is None:
-        return default
-    items = (item.strip().lstrip(".").lower() for item in value.split(","))
-    return frozenset(item for item in items if item)
+class Config(BaseSettings):
+    """Resolved configuration. Construct via :func:`get_config`."""
 
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+        validate_default=True,
+    )
 
-class Config:
-    """Resolved configuration. Read the class attributes; never ``os.environ``."""
-
-    # --- Inference (local Ollama) -------------------------------------------
-    LLM_BASE_URL: str
-    LLM_MODEL_NAME: str
-    LLM_API_KEY: str
-    LLM_CONCURRENCY: int
+    # --- Inference (local Ollama, or any OpenAI-compatible local gateway) ----
+    LLM_BASE_URL: str = "http://ollama:11434/v1"
+    LLM_MODEL_NAME: str = "qwen2.5:14b"
+    # Usually not a credential: the OpenAI SDK rejects an empty string and
+    # Ollama ignores the value. Settable because a local gateway in front of
+    # Ollama (LiteLLM, vLLM) may want a real token. It never leaves the
+    # perimeter either way, since the perimeter is enforced above.
+    LLM_API_KEY: SecretStr = SecretStr(_API_KEY_SENTINEL)
+    LLM_CONCURRENCY: int = Field(default=4, ge=1)
 
     # --- Embeddings (local Ollama) ------------------------------------------
-    EMBEDDING_BASE_URL: str
-    EMBEDDING_MODEL: str
+    EMBEDDING_BASE_URL: str = "http://ollama:11434"
+    EMBEDDING_MODEL: str = "nomic-embed-text"
 
     # --- Knowledge graph (local Neo4j) --------------------------------------
-    NEO4J_URI: str
-    NEO4J_USER: str
-    NEO4J_PASSWORD: str | None
+    NEO4J_URI: str = "bolt://neo4j:7687"
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: SecretStr = SecretStr("")
 
     # --- Simulation limits ---------------------------------------------------
-    MAX_ROUNDS: int
-    MAX_AGENTS: int
+    MAX_ROUNDS: int = Field(default=10, ge=1)
+    MAX_AGENTS: int = Field(default=100, ge=1)
 
     # --- Report generation ---------------------------------------------------
-    REPORT_TEMPERATURE: float
+    REPORT_TEMPERATURE: float = Field(default=0.5, ge=0.0, le=2.0)
 
     # --- Document ingestion --------------------------------------------------
-    CHUNK_SIZE: int
-    CHUNK_OVERLAP: int
-    MAX_CONTENT_LENGTH: int
-    ALLOWED_EXTENSIONS: frozenset[str]
+    CHUNK_SIZE: int = Field(default=500, ge=1)
+    CHUNK_OVERLAP: int = Field(default=50, ge=0)
+    MAX_CONTENT_LENGTH: int = Field(default=50 * 1024 * 1024, ge=1)
+    ALLOWED_EXTENSIONS: Annotated[frozenset[str], NoDecode] = frozenset(
+        {"pdf", "md", "txt", "markdown"}
+    )
 
     # --- Egress allowlist ----------------------------------------------------
-    ALLOWED_HOSTS: frozenset[str]
+    ALLOWED_HOSTS: Annotated[frozenset[str], NoDecode] = frozenset()
 
+    # Populated by the perimeter validator; surfaced at startup.
+    perimeter_notes: tuple[str, ...] = Field(default=(), exclude=True, repr=False)
+
+    _split = field_validator("ALLOWED_EXTENSIONS", "ALLOWED_HOSTS", mode="before")(
+        _split_csv
+    )
+
+    @field_validator("ALLOWED_EXTENSIONS")
     @classmethod
-    def reload(cls) -> None:
-        """Re-read every setting from the current environment.
+    def _require_an_extension(cls, value: frozenset[str]) -> frozenset[str]:
+        if not value:
+            raise ValueError("must list at least one extension")
+        return value
 
-        Exists so tests can manipulate ``os.environ`` and re-resolve without
-        reimporting the module.
-        """
-        _LOAD_ERRORS.clear()
-
-        cls.LLM_BASE_URL = _str("LLM_BASE_URL", "http://ollama:11434/v1")
-        cls.LLM_MODEL_NAME = _str("LLM_MODEL_NAME", "qwen2.5:14b")
-        # Not a credential. The OpenAI SDK rejects an empty string, and Ollama
-        # ignores the value entirely; there is nothing to authenticate against.
-        cls.LLM_API_KEY = _str("LLM_API_KEY", "ollama")
-        cls.LLM_CONCURRENCY = _int("LLM_CONCURRENCY", 4)
-
-        cls.EMBEDDING_BASE_URL = _str("EMBEDDING_BASE_URL", "http://ollama:11434")
-        cls.EMBEDDING_MODEL = _str("EMBEDDING_MODEL", "nomic-embed-text")
-
-        cls.NEO4J_URI = _str("NEO4J_URI", "bolt://neo4j:7687")
-        cls.NEO4J_USER = _str("NEO4J_USER", "neo4j")
-        # No default: an operator must choose one. See validate().
-        cls.NEO4J_PASSWORD = _str("NEO4J_PASSWORD")
-
-        cls.MAX_ROUNDS = _int("MAX_ROUNDS", 10)
-        cls.MAX_AGENTS = _int("MAX_AGENTS", 100)
-
-        cls.REPORT_TEMPERATURE = _float("REPORT_TEMPERATURE", 0.5)
-
-        cls.CHUNK_SIZE = _int("CHUNK_SIZE", 500)
-        cls.CHUNK_OVERLAP = _int("CHUNK_OVERLAP", 50)
-        cls.MAX_CONTENT_LENGTH = _int("MAX_CONTENT_LENGTH", 50 * 1024 * 1024)
-        cls.ALLOWED_EXTENSIONS = _csv(
-            "ALLOWED_EXTENSIONS", frozenset({"pdf", "md", "txt", "markdown"})
-        )
-
-        cls.ALLOWED_HOSTS = _csv("ALLOWED_HOSTS")
-
-    @classmethod
-    def allowed_hosts(cls) -> frozenset[str]:
-        """Every hostname this deployment may talk to."""
-        return ALWAYS_ALLOWED_HOSTS | cls.ALLOWED_HOSTS
-
-    @classmethod
-    def validate(cls) -> None:
-        """Raise :class:`ConfigError` unless the configuration is safe to run.
-
-        Checks, in order: coercion failures recorded during load, required
-        settings, numeric ranges, and — the load-bearing one — that no endpoint
-        points off-host.
-        """
-        errors: list[str] = list(_LOAD_ERRORS)
-
-        if not cls.NEO4J_PASSWORD:
-            errors.append(
-                "NEO4J_PASSWORD is not set. There is no default; choose one and "
-                "set it in .env (it must match NEO4J_AUTH in docker-compose.yml)."
+    @model_validator(mode="after")
+    def _require_neo4j_password(self) -> "Config":
+        if not self.NEO4J_PASSWORD.get_secret_value().strip():
+            raise ValueError(
+                "NEO4J_PASSWORD is not set. There is no default; choose one and set "
+                "it in .env (it must match NEO4J_AUTH in docker-compose.yml)."
             )
+        return self
 
-        if cls.LLM_CONCURRENCY < 1:
-            errors.append("LLM_CONCURRENCY must be at least 1")
-        if cls.MAX_ROUNDS < 1:
-            errors.append("MAX_ROUNDS must be at least 1")
-        if cls.MAX_AGENTS < 1:
-            errors.append("MAX_AGENTS must be at least 1")
-        if not 0.0 <= cls.REPORT_TEMPERATURE <= 2.0:
-            errors.append("REPORT_TEMPERATURE must be between 0.0 and 2.0")
-        if cls.CHUNK_SIZE < 1:
-            errors.append("CHUNK_SIZE must be at least 1")
-        if cls.CHUNK_OVERLAP < 0:
-            errors.append("CHUNK_OVERLAP must not be negative")
-        if cls.CHUNK_OVERLAP >= cls.CHUNK_SIZE:
-            # Otherwise the chunker makes no forward progress and loops forever.
-            errors.append(
-                f"CHUNK_OVERLAP ({cls.CHUNK_OVERLAP}) must be smaller than "
-                f"CHUNK_SIZE ({cls.CHUNK_SIZE})"
+    @model_validator(mode="after")
+    def _chunks_make_progress(self) -> "Config":
+        if self.CHUNK_OVERLAP >= self.CHUNK_SIZE:
+            # Otherwise the chunker never advances and loops forever.
+            raise ValueError(
+                f"CHUNK_OVERLAP ({self.CHUNK_OVERLAP}) must be smaller than "
+                f"CHUNK_SIZE ({self.CHUNK_SIZE})"
             )
-        if cls.MAX_CONTENT_LENGTH < 1:
-            errors.append("MAX_CONTENT_LENGTH must be at least 1")
-        if not cls.ALLOWED_EXTENSIONS:
-            errors.append("ALLOWED_EXTENSIONS must list at least one extension")
+        return self
 
-        allowed = cls.allowed_hosts()
-        cls._check_endpoint(errors, "LLM_BASE_URL", cls.LLM_BASE_URL, _HTTP_SCHEMES, allowed)
-        cls._check_endpoint(
-            errors, "EMBEDDING_BASE_URL", cls.EMBEDDING_BASE_URL, _HTTP_SCHEMES, allowed
-        )
-        cls._check_endpoint(errors, "NEO4J_URI", cls.NEO4J_URI, _BOLT_SCHEMES, allowed)
+    @model_validator(mode="after")
+    def _enforce_sealed_perimeter(self) -> "Config":
+        notes: list[str] = []
+        for name, schemes in (
+            ("LLM_BASE_URL", _HTTP_SCHEMES),
+            ("EMBEDDING_BASE_URL", _HTTP_SCHEMES),
+            ("NEO4J_URI", _BOLT_SCHEMES),
+        ):
+            note = self._check_endpoint(name, getattr(self, name), schemes)
+            if note:
+                notes.append(note)
 
-        if errors:
-            raise ConfigError(errors)
+        object.__setattr__(self, "perimeter_notes", tuple(notes))
+        for note in notes:
+            warnings.warn(note, PerimeterWarning, stacklevel=2)
+        return self
 
-    @staticmethod
-    def _check_endpoint(
-        errors: list[str],
-        name: str,
-        raw: str | None,
-        allowed_schemes: frozenset[str],
-        allowed_hosts: frozenset[str],
-    ) -> None:
-        """Reject an endpoint whose scheme is wrong or whose host is off-box."""
-        if not raw:
-            errors.append(f"{name} is not set")
-            return
+    def _check_endpoint(self, name: str, raw: str, allowed_schemes: frozenset[str]) -> str | None:
+        """Validate one endpoint. Returns a warning note, or raises to reject."""
+        from urllib.parse import urlparse
 
-        parsed = urlparse(raw)
+        if not raw or not raw.strip():
+            raise ValueError(f"{name} is not set")
+
+        parsed = urlparse(raw.strip())
         if parsed.scheme not in allowed_schemes:
-            errors.append(
+            raise ValueError(
                 f"{name} has scheme {parsed.scheme or '(none)'!r}; expected one of "
                 f"{sorted(allowed_schemes)}"
             )
-            return
 
         try:
             host = parsed.hostname
-        except ValueError:  # malformed IPv6 literal, bad port, etc.
+        except ValueError:  # malformed IPv6 literal or bad port
             host = None
         if not host:
-            errors.append(f"{name} ({raw!r}) has no hostname")
-            return
+            raise ValueError(f"{name} ({raw!r}) has no hostname")
 
-        if host in allowed_hosts:
-            return
+        kind = classify_host(host, self.ALLOWED_HOSTS)
+        if kind == "public":
+            raise ValueError(
+                f"{name} points at {host!r}, which is outside the sealed perimeter. "
+                f"Permitted: loopback, the service names {sorted(SERVICE_HOSTS)}, "
+                f"private/link-local addresses, or a host listed in ALLOWED_HOSTS. "
+                f"CrowdSight runs entirely on local infrastructure."
+            )
+        if kind == "private":
+            return (
+                f"{name} points at the private address {host!r}. This is permitted, "
+                f"but loopback or a Compose service name is preferred — traffic to "
+                f"another box on the LAN still leaves this host, and the "
+                f"container-level egress seal cannot cover it."
+            )
+        if kind == "allowlisted":
+            return (
+                f"{name} points at {host!r}, permitted only because it appears in "
+                f"ALLOWED_HOSTS. Names are never resolved, so this trusts your DNS."
+            )
+        return None
 
-        # A raw IP is allowed only if it is loopback. Everything else — public
-        # addresses and other hosts on the LAN alike — is off-box.
-        try:
-            if ip_address(host).is_loopback:
-                return
-        except ValueError:
-            pass
+    # --- Convenience ---------------------------------------------------------
 
-        errors.append(
-            f"{name} points at {host!r}, which is outside the sealed perimeter. "
-            f"Allowed: {sorted(allowed_hosts)}. CrowdSight runs entirely on local "
-            f"infrastructure; if this host really is on your LAN and you accept "
-            f"widening the perimeter, add it to ALLOWED_HOSTS."
-        )
+    @property
+    def neo4j_password(self) -> str:
+        return self.NEO4J_PASSWORD.get_secret_value()
 
-    @classmethod
-    def as_dict(cls, redact: bool = True) -> dict[str, object]:
+    @property
+    def llm_api_key(self) -> str:
+        return self.LLM_API_KEY.get_secret_value()
+
+    def as_dict(self, redact: bool = True) -> dict[str, Any]:
         """Resolved settings, for the health endpoint and startup logging."""
-        return {
-            "LLM_BASE_URL": cls.LLM_BASE_URL,
-            "LLM_MODEL_NAME": cls.LLM_MODEL_NAME,
-            "LLM_API_KEY": cls.LLM_API_KEY,  # the literal "ollama"; not secret
-            "LLM_CONCURRENCY": cls.LLM_CONCURRENCY,
-            "EMBEDDING_BASE_URL": cls.EMBEDDING_BASE_URL,
-            "EMBEDDING_MODEL": cls.EMBEDDING_MODEL,
-            "NEO4J_URI": cls.NEO4J_URI,
-            "NEO4J_USER": cls.NEO4J_USER,
-            "NEO4J_PASSWORD": (
-                ("***" if cls.NEO4J_PASSWORD else None) if redact else cls.NEO4J_PASSWORD
-            ),
-            "MAX_ROUNDS": cls.MAX_ROUNDS,
-            "MAX_AGENTS": cls.MAX_AGENTS,
-            "REPORT_TEMPERATURE": cls.REPORT_TEMPERATURE,
-            "CHUNK_SIZE": cls.CHUNK_SIZE,
-            "CHUNK_OVERLAP": cls.CHUNK_OVERLAP,
-            "MAX_CONTENT_LENGTH": cls.MAX_CONTENT_LENGTH,
-            "ALLOWED_EXTENSIONS": sorted(cls.ALLOWED_EXTENSIONS),
-            "ALLOWED_HOSTS": sorted(cls.ALLOWED_HOSTS),
-        }
+        data = self.model_dump(mode="json")
+        data.pop("perimeter_notes", None)
+        data["ALLOWED_EXTENSIONS"] = sorted(self.ALLOWED_EXTENSIONS)
+        data["ALLOWED_HOSTS"] = sorted(self.ALLOWED_HOSTS)
+        if redact:
+            data["NEO4J_PASSWORD"] = "***" if self.neo4j_password else None
+            # Revealed only while it is the inert default; a value an operator
+            # actually chose is treated as a credential.
+            data["LLM_API_KEY"] = (
+                _API_KEY_SENTINEL if self.llm_api_key == _API_KEY_SENTINEL else "***"
+            )
+        else:
+            data["NEO4J_PASSWORD"] = self.neo4j_password
+            data["LLM_API_KEY"] = self.llm_api_key
+        return data
 
 
-Config.reload()
+_config: Config | None = None
+
+
+def get_config(**overrides: Any) -> Config:
+    """Return the process-wide config, constructing it on first use.
+
+    Raises :class:`ConfigError` — not pydantic's ``ValidationError`` — so
+    callers depend on this module's contract rather than on pydantic's.
+    """
+    global _config
+    if _config is None or overrides:
+        try:
+            config = Config(**overrides)
+        except ValidationError as exc:
+            raise ConfigError.from_validation_error(exc) from exc
+        if not overrides:
+            _config = config
+        return config
+    return _config
+
+
+def reload_config(**overrides: Any) -> Config:
+    """Discard the cached config and re-read the environment."""
+    global _config
+    _config = None
+    config = get_config(**overrides)
+    _config = config
+    return config
 
 
 if __name__ == "__main__":  # pragma: no cover
     import json
     import sys
 
-    print(json.dumps(Config.as_dict(), indent=2, sort_keys=True))
-    try:
-        Config.validate()
-    except ConfigError as exc:
-        print(f"\n{exc}", file=sys.stderr)
-        raise SystemExit(1)
-    print("\nConfiguration valid; all endpoints are inside the sealed perimeter.")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", PerimeterWarning)
+        try:
+            config = get_config()
+        except ConfigError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(1)
+
+    print(json.dumps(config.as_dict(), indent=2, sort_keys=True))
+    sys.stdout.flush()
+
+    for note in config.perimeter_notes:
+        print(f"\nWARNING: {note}", file=sys.stderr)
+    sys.stderr.flush()
+
+    if config.perimeter_notes:
+        print(
+            f"\nConfiguration valid, with {len(config.perimeter_notes)} endpoint(s) "
+            f"reaching beyond loopback. See the warnings above."
+        )
+    else:
+        print("\nConfiguration valid; every endpoint is on loopback or a service name.")

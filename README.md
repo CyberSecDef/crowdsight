@@ -45,9 +45,19 @@ and packages), after which the stack runs sealed.
 | Backend API | `http://localhost:5000` | HTTP (loopback/LAN) |
 | Frontend | `http://localhost:5173` (dev) / `:8080` (prod) | HTTP |
 
+Service names are the preferred form, and loopback (`localhost`, `127.0.0.1`, `::1`) is
+equally good outside Compose. A **private LAN address** — RFC 1918, link-local, or
+unique-local — is permitted where genuinely necessary, such as Ollama running on a
+separate GPU box, but it is second-best and CrowdSight says so out loud: every such
+endpoint logs a warning at startup, because traffic to another machine still leaves this
+host and the container-level egress seal cannot cover it. Public addresses and public
+hostnames are refused outright.
+
 Any other outbound destination is a defect. There is no third-party API key anywhere in
-this system; `LLM_API_KEY` exists solely because the OpenAI SDK requires a non-empty
-string, and its value must be the literal `ollama`.
+this system. `LLM_API_KEY` exists because the OpenAI SDK requires a non-empty string; it
+defaults to the literal `ollama`, which Ollama ignores. It is settable so a local
+OpenAI-compatible gateway (LiteLLM, vLLM) can be given a token — a value that, like
+everything else here, never leaves the perimeter.
 
 ---
 
@@ -109,7 +119,8 @@ runs.
 
 Key Python packages: `flask>=3.0`, `flask-cors>=6.0`, `openai>=1.0` (SDK only, pointed at
 Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0`,
-`PyMuPDF>=1.24`, `python-dotenv>=1.0`, `httpx>=0.27`, `charset-normalizer`, `chardet`.
+`pydantic-settings>=2.2`, `PyMuPDF>=1.24`, `python-dotenv>=1.0`, `httpx>=0.27`,
+`charset-normalizer`, `chardet`. Full list in `backend/requirements.txt`.
 
 ---
 
@@ -221,29 +232,51 @@ docker-compose.provision.yml
 
 ## Configuration
 
-All settings live in `backend/app/config.py`, read from environment variables with
-defaults. Copy `.env.example` to `.env` to override.
+All settings live in `backend/app/config.py`, a `pydantic-settings` `BaseSettings` model.
+Every field is typed, constrained, and bound to the environment variable of the same name.
+Copy `.env.example` to `.env` to override. Inspect the resolved configuration — and check
+it — with:
+
+```bash
+docker compose exec backend python -m app.config
+```
 
 | Variable | Default |
 |---|---|
 | `LLM_BASE_URL` | `http://ollama:11434/v1` |
 | `LLM_MODEL_NAME` | `qwen2.5:14b` |
-| `LLM_API_KEY` | `ollama` (literal — the SDK just needs a non-empty string) |
-| `EMBEDDING_BASE_URL` | Ollama embeddings endpoint |
+| `LLM_API_KEY` | `ollama` (inert; the SDK just needs a non-empty string) |
+| `LLM_CONCURRENCY` | `4` |
+| `EMBEDDING_BASE_URL` | `http://ollama:11434` |
 | `EMBEDDING_MODEL` | `nomic-embed-text` |
 | `NEO4J_URI` | `bolt://neo4j:7687` |
-| `NEO4J_USER` / `NEO4J_PASSWORD` | operator-supplied |
+| `NEO4J_USER` | `neo4j` |
+| `NEO4J_PASSWORD` | **none — you must set this** |
 | `MAX_ROUNDS` | `10` |
 | `MAX_AGENTS` | `100` |
 | `REPORT_TEMPERATURE` | `0.5` |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `500` / `50` |
 | `MAX_CONTENT_LENGTH` | 50 MB |
 | `ALLOWED_EXTENSIONS` | `pdf, md, txt, markdown` |
+| `ALLOWED_HOSTS` | empty |
 
-`Config.validate()` parses `LLM_BASE_URL`, `EMBEDDING_BASE_URL`, and `NEO4J_URI` and
-**refuses to start** if a hostname is not in the allowlist (`localhost`, `127.0.0.1`,
-`ollama`, `neo4j`, or an operator-supplied `ALLOWED_HOSTS`). Missing required variables
-fail loudly rather than defaulting silently.
+Constructing the config validates it. A model validator parses `LLM_BASE_URL`,
+`EMBEDDING_BASE_URL`, and `NEO4J_URI` and classifies each host:
+
+| Host | Result |
+|---|---|
+| `localhost`, `127.0.0.1`, `::1` | accepted silently — **preferred** |
+| `ollama`, `neo4j` | accepted silently — the default deployment |
+| `10.x`, `172.16–31.x`, `192.168.x`, `169.254.x`, `fd00::/8` | accepted **with a warning** |
+| anything in `ALLOWED_HOSTS` | accepted with a warning |
+| public IPs and public hostnames | **refused — the process does not start** |
+
+Hostnames are never resolved during this check. DNS can point anywhere, and a guarantee
+that depends on what a resolver returns today is not a guarantee — so a name is trusted
+only if it is a known service name or an explicit opt-in, while IP literals are judged by
+the address itself. Missing required variables and out-of-range values (`MAX_ROUNDS < 1`,
+`REPORT_TEMPERATURE > 2.0`, `CHUNK_OVERLAP >= CHUNK_SIZE`) fail loudly rather than
+defaulting silently, and every problem is reported at once rather than one per restart.
 
 ---
 
