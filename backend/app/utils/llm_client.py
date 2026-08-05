@@ -30,8 +30,11 @@ routes use :class:`SyncLLMClient`, which owns a background event loop —
 ``asyncio.run`` per call would close the loop the underlying HTTP pool is
 bound to.
 
-Concurrency limiting and retry/backoff are Phase 2 Step 2. This module takes
-an optional ``gate`` so that work can be injected without rewriting callers.
+Concurrency limiting and retry live in :mod:`app.utils.retry`. Requests pass
+through the process-wide gate, shared with the embedding service because both
+contend for the same GPU, and transient failures are retried with jittered
+backoff. The gate is acquired per attempt rather than around the retry loop,
+so a coroutine sleeping through backoff does not hold an in-flight slot.
 """
 
 from __future__ import annotations
@@ -44,10 +47,12 @@ import re
 import threading
 from typing import Any, AsyncContextManager, Callable, Mapping, Sequence, TypeVar
 
+import httpx
 from openai import APIStatusError, AsyncOpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from app.config import Config, get_config
+from app.utils.retry import RetryPolicy, get_llm_gate, retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +67,6 @@ __all__ = [
 
 Message = Mapping[str, Any]
 ModelT = TypeVar("ModelT", bound=BaseModel)
-
-# Local generation is slow. A 14b model producing a long completion can sit for
-# 30-90 seconds, and a report agent longer still. Step 2 refines this.
-DEFAULT_TIMEOUT = 300.0
 
 # Structured output benefits from near-greedy decoding; creativity here shows
 # up as invented fields, not better prose.
@@ -215,12 +216,6 @@ def _validate(data: Any, schema: Any) -> Any:
 # --------------------------------------------------------------------------
 
 
-@contextlib.asynccontextmanager
-async def _no_gate() -> Any:
-    """Default concurrency gate: none. Step 2 supplies the real one."""
-    yield
-
-
 class LLMClient:
     """Async wrapper over the OpenAI SDK, pointed at local Ollama."""
 
@@ -230,19 +225,28 @@ class LLMClient:
         *,
         client: Any | None = None,
         max_json_attempts: int = 3,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | None = None,
         gate: Callable[[], AsyncContextManager[Any]] | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.config = config or get_config()
         self.model = self.config.LLM_MODEL_NAME
         self.max_json_attempts = max(1, max_json_attempts)
-        self._gate = gate or _no_gate
+        self.retry_policy = retry_policy or self.config.llm_retry_policy()
+        # Shared with the embedding service: both contend for the same GPU, so
+        # bounding them separately would let their sum exceed the limit that
+        # exists to prevent an OOM.
+        self._gate = gate or get_llm_gate()
         self._owns_client = client is None
+        # Split timeouts. Generation legitimately takes minutes; a connection
+        # either establishes at once or is not going to, and a 300s connect
+        # timeout would turn "Ollama is down" into a five-minute hang.
+        read_timeout = timeout if timeout is not None else self.config.LLM_TIMEOUT
         self._client = client or AsyncOpenAI(
             base_url=self.config.LLM_BASE_URL,
             api_key=self.config.llm_api_key,
-            timeout=timeout,
-            max_retries=0,  # Step 2 owns retry policy; two layers would compound.
+            timeout=httpx.Timeout(read_timeout, connect=self.config.LLM_CONNECT_TIMEOUT),
+            max_retries=0,  # retry.py owns retry policy; two layers would compound.
         )
         # Set to False permanently the first time the server rejects the
         # parameter, so one 400 does not become a 400 on every later call.
@@ -376,23 +380,40 @@ class LLMClient:
         if json_mode and self._supports_json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        async with self._gate():
-            try:
-                response = await self._client.chat.completions.create(**payload)
-            except APIStatusError as exc:
-                if json_mode and self._supports_json_mode and self._is_format_rejection(exc):
-                    logger.warning(
-                        "Server rejected response_format; disabling JSON mode for "
-                        "this client and relying on prompt plus repair loop. (%s)",
-                        exc,
-                    )
-                    self._supports_json_mode = False
-                    payload.pop("response_format", None)
-                    response = await self._client.chat.completions.create(**payload)
-                else:
-                    raise
+        try:
+            response = await self._send(payload)
+        except APIStatusError as exc:
+            if json_mode and self._supports_json_mode and self._is_format_rejection(exc):
+                logger.warning(
+                    "Server rejected response_format; disabling JSON mode for "
+                    "this client and relying on prompt plus repair loop. (%s)",
+                    exc,
+                )
+                self._supports_json_mode = False
+                payload.pop("response_format", None)
+                response = await self._send(payload)
+            else:
+                raise
 
         return self._content_of(response)
+
+    async def _send(self, payload: dict[str, Any]) -> Any:
+        """One request, retried on transient failure.
+
+        The gate is acquired *inside* the retry loop, not around it, so a
+        coroutine sleeping through backoff does not hold one of the four
+        in-flight slots hostage while doing nothing.
+        """
+
+        async def attempt() -> Any:
+            async with self._gate():
+                return await self._client.chat.completions.create(**payload)
+
+        return await retry_async(
+            attempt,
+            policy=self.retry_policy,
+            description=f"Ollama chat completion ({self.model})",
+        )
 
     @staticmethod
     def _is_format_rejection(exc: APIStatusError) -> bool:

@@ -299,7 +299,10 @@ docker compose exec backend python -m app.config
 | `LLM_BASE_URL` | `http://ollama:11434/v1` |
 | `LLM_MODEL_NAME` | `qwen2.5:14b` |
 | `LLM_API_KEY` | `ollama` (inert; the SDK just needs a non-empty string) |
-| `LLM_CONCURRENCY` | `4` |
+| `LLM_CONCURRENCY` | `4` (per process — Phase 6 divides it across simulation workers) |
+| `LLM_TIMEOUT` / `LLM_CONNECT_TIMEOUT` | `300` / `10` seconds |
+| `LLM_MAX_ATTEMPTS` | `3` |
+| `LLM_RETRY_BASE_DELAY` / `LLM_RETRY_MAX_DELAY` | `1.0` / `30.0` seconds |
 | `EMBEDDING_BASE_URL` | `http://ollama:11434` |
 | `EMBEDDING_MODEL` | `nomic-embed-text` |
 | `NEO4J_URI` | `bolt://neo4j:7687` |
@@ -365,8 +368,12 @@ cloud model), and `test_report_grounding.py` (every citation resolves to real ru
 
 ## Operational notes
 
-- Ollama serialises requests; concurrency above ~4 degrades throughput. Tune
-  `LLM_CONCURRENCY` rather than raising it blindly.
+- Ollama serialises requests; concurrency above ~4 degrades throughput and risks a GPU
+  OOM. Tune `LLM_CONCURRENCY` rather than raising it blindly. The bound is **per process**
+  and shared between chat and embeddings, since both contend for the same GPU.
+- Transient failures (connection resets, read timeouts, 5xx while a model loads into VRAM)
+  are retried with exponential backoff and full jitter. Malformed requests are not retried
+  — retrying a 400 wastes minutes and buries the real error.
 - Neo4j heap defaults are conservative. Raise `NEO4J_server_memory_heap_max__size` for
   graphs over ~10k nodes.
 - Each run's SQLite database lives in `data/simulations/<sim_id>/`. They accumulate; prune

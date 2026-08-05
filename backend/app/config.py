@@ -149,7 +149,18 @@ class Config(BaseSettings):
     # Ollama (LiteLLM, vLLM) may want a real token. It never leaves the
     # perimeter either way, since the perimeter is enforced above.
     LLM_API_KEY: SecretStr = SecretStr(_API_KEY_SENTINEL)
+    # Per process. Phase 6 spawns a process per simulation and must divide
+    # this across its workers; the bound exists to stop a GPU OOM, and three
+    # concurrent runs at 4 each would put 12 requests in flight.
     LLM_CONCURRENCY: int = Field(default=4, ge=1)
+    # Generous by necessity: a 14b model producing a long completion routinely
+    # takes 30-90s, and a report agent longer. Connecting, by contrast, either
+    # works immediately or is not going to.
+    LLM_TIMEOUT: float = Field(default=300.0, gt=0)
+    LLM_CONNECT_TIMEOUT: float = Field(default=10.0, gt=0)
+    LLM_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    LLM_RETRY_BASE_DELAY: float = Field(default=1.0, ge=0)
+    LLM_RETRY_MAX_DELAY: float = Field(default=30.0, ge=0)
 
     # --- Embeddings (local Ollama) ------------------------------------------
     EMBEDDING_BASE_URL: str = "http://ollama:11434"
@@ -289,6 +300,16 @@ class Config(BaseSettings):
         return None
 
     # --- Convenience ---------------------------------------------------------
+
+    def llm_retry_policy(self) -> Any:
+        """Retry policy for calls to Ollama, built from configuration."""
+        from app.utils.retry import RetryPolicy
+
+        return RetryPolicy(
+            max_attempts=self.LLM_MAX_ATTEMPTS,
+            base_delay=self.LLM_RETRY_BASE_DELAY,
+            max_delay=self.LLM_RETRY_MAX_DELAY,
+        )
 
     @property
     def neo4j_password(self) -> str:

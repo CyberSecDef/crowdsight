@@ -155,8 +155,20 @@ Build `backend/app/utils/llm_client.py` wrapping the OpenAI SDK pointed at `LLM_
 
 **`schema` accepts either form.** A pydantic model class returns a validated instance; a JSON Schema mapping returns a validated dict. Both are needed — Phase 4's profiles are a fixed shape that deserves a model, while Phase 3's generated ontology has no known shape until the model proposes it. Validating the mapping form requires `jsonschema`; report all violations at once rather than one per round trip. Inject the schema as a system message, **appended to any existing system prompt rather than replacing it**, since callers set persona and task there.
 
-**Step 2: Retry, timeout, and concurrency control**
-Build `backend/app/utils/retry.py` with exponential backoff and jitter for transient failures. Add a global semaphore bounding concurrent Ollama requests (default 4, configurable) — a single Ollama instance serialises internally and unbounded concurrency degrades throughput and can OOM the GPU. Set generous timeouts: local 14b generation can take 30–90 s for long completions.
+**Step 2: Retry, timeout, and concurrency control** ✅
+Build `backend/app/utils/retry.py` with exponential backoff and jitter for transient failures. Add a semaphore bounding concurrent Ollama requests (default 4, configurable) — a single Ollama instance serialises internally and unbounded concurrency degrades throughput and can OOM the GPU. Set generous timeouts: local 14b generation can take 30–90 s for long completions.
+
+**Retry only what could plausibly succeed.** `is_transient` returns true for connection resets, read timeouts, 429, and 5xx — the last commonly being Ollama loading a model into VRAM. Everything else in the 4xx range is our own malformed request and will fail identically next time; retrying it wastes minutes and buries the real error. Re-raise the *original* exception when the budget is exhausted rather than wrapping it, because callers match on concrete SDK types. Keep the classifier's imports of `openai`, `httpx` and `neo4j` local and guarded so the module does not couple those three layers together.
+
+**Backoff uses full jitter** — `uniform(0, min(cap, base * multiplier**n))`, not a fixed exponential. When a local Ollama restarts, every queued agent turn fails at once; undithered backoff sends them all back simultaneously, repeatedly.
+
+**The gate is per process, per event loop.** A semaphore awaited from a loop other than the one it was created on is undefined behaviour, and `SyncLLMClient` runs its own loop on a background thread, so create one semaphore per loop behind a single gate object. Acquire the gate **inside** the retry loop, never around it: a coroutine sleeping through backoff must not hold one of the four in-flight slots while doing nothing. Chat completions and embeddings share one gate — they contend for the same GPU, and bounding them separately would let their sum exceed the limit that exists to prevent the OOM.
+
+Expose `in_flight`, `peak_in_flight`, `total_acquired` and `total_waited` on the gate. The health endpoint needs them, and so do tests: proving the bound is *respected* requires observing the peak, not merely asserting the semaphore exists.
+
+Configuration added here: `LLM_TIMEOUT` (300 s), `LLM_CONNECT_TIMEOUT` (10 s), `LLM_MAX_ATTEMPTS` (3), `LLM_RETRY_BASE_DELAY` (1.0), `LLM_RETRY_MAX_DELAY` (30.0). Split the timeouts — generation legitimately takes minutes, but a connection either establishes immediately or will not, and a single 300 s timeout turns "Ollama is down" into a five-minute hang. Pass `max_retries=0` to the OpenAI SDK so its own retry layer does not compound with this one.
+
+Provide `retry_sync` alongside `retry_async`: the Neo4j driver in Step 4 is synchronous.
 
 **Step 3: Embedding service**
 Build `backend/app/storage/embedding_service.py` calling Ollama's embeddings endpoint with `nomic-embed-text`, returning 768-dim vectors. Implement batching and an on-disk cache keyed by content hash — re-embedding unchanged chunks across runs is pure waste.
@@ -265,6 +277,8 @@ This is the single most important integration point in the project: it is what k
 
 **Step 2: Process isolation and IPC**
 Run each simulation in a separate OS process, not a thread. Runs are long, memory-heavy, and must be independently killable without taking down the API. Build `simulation_ipc.py` for control-plane messaging (status, stop, interview requests) over a queue or Unix socket, and `simulation_manager.py` to track PIDs, lifecycle state, and cleanup of orphaned processes on restart.
+
+**`simulation_manager` must divide the `LLM_CONCURRENCY` budget across the workers it spawns**, passing each its share via the environment. Phase 2's gate is per process, so without this three concurrent runs at 4 each put 12 requests in flight against one Ollama — precisely the GPU OOM the bound exists to prevent. The arithmetic is deliberately explicit rather than hidden behind a cross-process semaphore, whose blocking `acquire` would park one thread per waiting coroutine, hundreds of them during a 300-agent round. Reserve a share for the API process too, which still serves interviews while a run is in flight.
 
 **Step 3: Round loop and persistence**
 Drive the OASIS environment round by round. After each round, persist agent actions, posts, and comments to the run's SQLite database, and write a checkpoint enabling resume. Emit structured progress: current round, total rounds, per-action counts, agents active.
