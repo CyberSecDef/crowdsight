@@ -223,8 +223,22 @@ Mark only the server-dependent tests `integration`. The identifier, source-audit
 
 ### Phase 3: Document ingestion and knowledge graph construction
 
-**Step 1: File parsing**
+**Step 1: File parsing** ✅
 Build `backend/app/utils/file_parser.py` handling PDF (PyMuPDF), Markdown, and plain text. Detect encoding with `charset-normalizer`/`chardet`. Enforce the 50 MB cap and extension allowlist. Return normalised plain text plus metadata (filename, page count, character count).
+
+Everything downstream is built on what this returns, so its failures are expensive and quiet: subtly wrong text produces a subtly wrong graph, then a population of agents reacting to something nobody said. Bias towards refusing unreadable input loudly, at upload time.
+
+**PDF is positioned glyphs, not text.** Reading a two-column page in document order splices sentences across the gutter, inventing text that appears nowhere in the source. Extract positioned blocks and order them by layout: treat full-width blocks (titles, section headers, footers) as region separators, and emit each region left column then right. Also de-hyphenate line-break hyphens — but note the limit honestly. Joining `govern-\nment` correctly also collapses `mayor-\nelect` into `mayorelect`; telling them apart needs a lexicon we do not have, and typographic hyphenation is far the commoner case. Restricting the rule to lowercase-to-lowercase at least spares `Smith-\nJones`.
+
+**Reject scanned PDFs specifically.** A page with no text layer yields near-zero characters. Detect it (fewer than ~25 characters per page) and raise an error naming the cause and the fix, rather than building an empty knowledge graph that looks like a modelling failure three stages later. There is no OCR in this system.
+
+Reject password-protected PDFs by name too, rather than letting the driver fail obscurely.
+
+**Markdown is prose wrapped in syntax.** Keep heading text, list item text and link *labels*; drop `#` markers, URLs, image references, code fences and HTML comments. Headings carry section context that helps disambiguate mentions; a URL or a Python snippet is noise the extractor will otherwise offer up as an entity.
+
+**Normalise with NFKC.** PDFs are full of ligatures (`ﬁ`, `ﬄ`) and typographic variants that look identical but compare as different strings. Deduplication compares strings, so leaving them distinct puts the same organisation in the graph twice. Strip zero-width and soft-hyphen characters for the same reason — they are invisible, so the mismatch they cause is invisible too.
+
+**Encoding detection needs two gates, and neither alone suffices.** Try a BOM, then a strict UTF-8 decode (what most files actually are, and it either succeeds exactly or fails cleanly). Only then run statistical detection, restricted to a curated candidate list — over the full codepage space, ten bytes of Latin-1 are confidently reported as Cyrillic. Accept the guess only when there is evidence to judge it: **coherence ≥ 0.1 or at least ~128 bytes of input**. Coherence alone rejects correctly-detected Japanese, which scores 0.000 because the metric does not apply to CJK; length alone accepts confident nonsense on long inputs of an exotic encoding. Fall back to cp1252, then UTF-8 with replacement — a few substituted characters in a long document is recoverable, and refusing the upload is not obviously better.
 
 **Step 2: Chunking**
 Split extracted text into overlapping chunks (default 500 characters, 50 overlap). Prefer semantic boundaries — split on paragraph then sentence before falling back to hard character cuts — so entity mentions are not severed mid-phrase.
