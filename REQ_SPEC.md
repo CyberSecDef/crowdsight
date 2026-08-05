@@ -34,7 +34,7 @@ Sized against the reference target (Ryzen 9 8940HX, 32 threads, 61 GB RAM, RTX 5
 - **Docker Engine 24+** and Docker Compose v2.
 - **Ollama 0.30+** — serves both chat completions and embeddings on `:11434`.
 - **Neo4j Community Edition 5.15+** — knowledge graph and agent memory store.
-- **Python packages** — `flask>=3.0`, `flask-cors>=6.0`, `openai>=1.0` (SDK only, pointed at Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0`, `pydantic-settings>=2.2`, `PyMuPDF>=1.24`, `python-dotenv>=1.0`, `httpx>=0.27`, `charset-normalizer`, `chardet`.
+- **Python packages** — `flask>=3.0`, `flask-cors>=6.0`, `openai>=1.0` (SDK only, pointed at Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0`, `pydantic-settings>=2.2`, `jsonschema>=4.0`, `PyMuPDF>=1.24`, `python-dotenv>=1.0`, `httpx>=0.27`, `charset-normalizer`, `chardet`.
 - **Test packages** — `pytest`, `pytest-asyncio`, `pytest-cov`, `responses` or `respx` for HTTP mocking, `testcontainers` (optional, for ephemeral Neo4j in integration tests).
 - **Ollama models** — `qwen2.5:14b` (reasoning/generation) and `nomic-embed-text` (768-dim embeddings). Optionally `qwen2.5:32b` for higher-VRAM hosts.
 - **Frontend** — Vue 3 + Vite, a graph visualisation library (Cytoscape.js or vis-network), and a charting library.
@@ -140,8 +140,20 @@ CI wiring is deferred to Phase 10 Step 2, which is the egress verification gate.
 
 ### Phase 2: Local service layer — Ollama and Neo4j clients
 
-**Step 1: LLM client**
+**Step 1: LLM client** ✅
 Build `backend/app/utils/llm_client.py` wrapping the OpenAI SDK pointed at `LLM_BASE_URL`. Expose `complete(messages, temperature, max_tokens)` and `complete_json(messages, schema)`. The JSON variant is load-bearing: nearly every downstream stage expects structured output from a local model, and 14b-class models are markedly less reliable at strict JSON than frontier models. Implement a repair loop — attempt parse, on failure re-prompt with the parser error appended, retry up to N times, then raise a typed `LLMJSONError`. Strip markdown code fences before parsing. Log every failure with the raw response for debugging.
+
+**Async-first.** `LLMClient` is async, built on `AsyncOpenAI`. CAMEL/OASIS are async internally so Phase 6 binds directly; Phase 4's fan-out becomes `asyncio.gather` rather than a thread pool; and Step 2's concurrency bound is an `asyncio.Semaphore`. Flask routes use `SyncLLMClient`, a blocking facade that owns a **long-lived event loop on a background thread** — `asyncio.run` per call closes the loop the HTTP connection pool is bound to, and the second call then dies with "Event loop is closed". Pass `max_retries=0` to the SDK: Step 2 owns retry policy, and two layers of backoff compound into surprising latency.
+
+**Three layers of JSON defence, cheapest first.** Re-prompting costs 30–90 s of local inference, so exhaust the free options before spending that:
+
+1. **Server-side enforcement** — send `response_format={"type": "json_object"}`. If the server rejects the parameter, notice once, disable it for that client, and carry on with prompt plus repair; do not fail every later call over it.
+2. **Local salvage, no round trip** — strip fences, then scan for the first balanced JSON value, tracking string state so a brace inside a string literal does not end the scan. Models wrap good JSON in prose far more often than they emit broken syntax.
+3. **Re-prompt with the error** — only when the text genuinely will not parse or fails validation. Keep the bad reply in the conversation as an assistant turn so the model can see what it did.
+
+`LLMJSONError` must carry every raw response and every parser error in order: a failure at agent 217 of 300 is otherwise unreproducible.
+
+**`schema` accepts either form.** A pydantic model class returns a validated instance; a JSON Schema mapping returns a validated dict. Both are needed — Phase 4's profiles are a fixed shape that deserves a model, while Phase 3's generated ontology has no known shape until the model proposes it. Validating the mapping form requires `jsonschema`; report all violations at once rather than one per round trip. Inject the schema as a system message, **appended to any existing system prompt rather than replacing it**, since callers set persona and task there.
 
 **Step 2: Retry, timeout, and concurrency control**
 Build `backend/app/utils/retry.py` with exponential backoff and jitter for transient failures. Add a global semaphore bounding concurrent Ollama requests (default 4, configurable) — a single Ollama instance serialises internally and unbounded concurrency degrades throughput and can OOM the GPU. Set generous timeouts: local 14b generation can take 30–90 s for long completions.
