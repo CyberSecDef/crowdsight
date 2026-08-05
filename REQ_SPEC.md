@@ -78,7 +78,7 @@ Any other outbound destination is a defect. There is no API key to a third party
 **Step 1: Repository scaffold** ✅
 Create the project skeleton: `backend/app/{api,services,storage,utils,models}`, `backend/tests`, `frontend/src`, `data/{uploads,graphs,simulations,reports}`, plus `docker-compose.yml`, `Dockerfile`, `.env.example`, `README.md`. Initialise git. Add a `.gitignore` covering `.env`, `data/`, `__pycache__`, `node_modules`, and `*.db`.
 
-**Step 2: The configuration module**
+**Step 2: The configuration module** ✅
 Build `backend/app/config.py` as the single source of truth. It reads environment variables, applies defaults, and exposes a `validate()` classmethod. Required settings: `LLM_BASE_URL` (default `http://ollama:11434/v1`), `LLM_MODEL_NAME` (default `qwen2.5:14b`), `LLM_API_KEY` (default `ollama`), `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL` (default `nomic-embed-text`), `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `MAX_ROUNDS` (default 10), `MAX_AGENTS` (default 100), `REPORT_TEMPERATURE` (default 0.5), `CHUNK_SIZE` (default 500), `CHUNK_OVERLAP` (default 50), `MAX_CONTENT_LENGTH` (50 MB), `ALLOWED_EXTENSIONS` (`pdf, md, txt, markdown`).
 
 Critically, `validate()` must **reject any configuration pointing off-host**. Parse `LLM_BASE_URL`, `EMBEDDING_BASE_URL` and `NEO4J_URI`; if the hostname is not in the allowlist (`localhost`, `127.0.0.1`, `ollama`, `neo4j`, or an operator-supplied `ALLOWED_HOSTS` list), raise and refuse to start. This is a deliberate inversion of the upstream project, which rejected self-hosted memory URLs; here we reject *non*-local ones.
