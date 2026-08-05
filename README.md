@@ -336,18 +336,26 @@ defaulting silently, and every problem is reported at once rather than one per r
 ## Testing
 
 ```bash
-docker compose exec backend pytest                            # fast unit suite
-docker compose exec backend pytest -m integration             # slow, needs live services
-docker compose exec backend pytest tests/test_egress_verification.py
+docker compose exec backend pytest                     # everything
+docker compose exec backend pytest -m "not integration" # fast unit suite
+pytest backend/tests/test_network_isolation.py         # from the host, stack running
 ```
+
+The image's `dev` build target carries pytest; production images are built with
+`--target runtime` and stay lean.
 
 Integration tests (`test_simulation_smoke.py`, `test_e2e_pipeline.py`) run real micro-runs
 against local Ollama and are required before any release.
 
-**`tests/test_egress_verification.py` is the compliance gate.** It asserts the backend
-container has no route off-host, that config validation rejects external URLs, and that no
-source file contains a non-allowlisted URL literal. A failure there is a release blocker,
-not a warning.
+**`tests/test_network_isolation.py` is the compliance gate.** It asserts that the backend
+container cannot open TCP connections off-host, cannot resolve external DNS names, and has
+no default route — and it **never skips**. A test that quietly passes by skipping itself
+when it cannot verify the seal is worse than no test at all, so with the stack down the
+suite goes red rather than green. A failure there is a release blocker, not a warning.
+
+Run it either way: inside the container it asserts against its own network stack; from the
+host it shells in via `docker compose exec`. The topology assertions (network flags, port
+bindings, gateway) inspect the Docker daemon and so run host-side only.
 
 Other high-value tests: `test_oasis_profile_contract.py` (schema mismatches otherwise
 surface hours into a run), `test_ollama_model_binding.py` (no code path can construct a

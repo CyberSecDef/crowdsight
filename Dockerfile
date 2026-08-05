@@ -6,8 +6,14 @@
 # camel-ai 0.2.78 allows <3.13. 3.11 is the only version satisfying both.
 # The reference host runs system Python 3.14, which is why this is
 # containerised rather than run from a host virtualenv.
+#
+# Two targets:
+#   runtime — production. Application dependencies only.
+#   dev     — adds pytest and friends. Compose builds this by default so the
+#             suite runs against the real dependency set rather than an
+#             approximation of it. Build production with --target runtime.
 
-FROM python:3.11-slim
+FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -37,8 +43,17 @@ RUN groupadd -g "${GID}" crowdsight 2>/dev/null || true \
     && mkdir -p /app/data \
     && chown -R "${UID}:${GID}" /app
 
-USER ${UID}:${GID}
 
+FROM base AS runtime
+USER crowdsight
 EXPOSE 5000
+CMD ["python", "-m", "app.main"]
 
+
+FROM base AS dev
+# requirements-dev.txt arrived with the COPY of backend/ above and pulls in
+# requirements.txt, which is already satisfied.
+RUN pip install -r requirements-dev.txt
+USER crowdsight
+EXPOSE 5000
 CMD ["python", "-m", "app.main"]

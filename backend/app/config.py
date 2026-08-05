@@ -193,35 +193,52 @@ class Config(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def _require_neo4j_password(self) -> "Config":
+    def _validate_deployment(self) -> "Config":
+        """Cross-field checks, accumulated.
+
+        Deliberately a single validator rather than several. Pydantic runs
+        ``mode="after"`` validators in sequence and the first to raise aborts
+        the rest, so splitting these would report one problem per restart —
+        exactly the whack-a-mole this module promises to avoid. Errors are
+        gathered here and raised together as a :class:`ConfigError`, which
+        pydantic passes through untouched (it only converts ``ValueError`` and
+        ``AssertionError``).
+
+        Type and range failures still surface first, as a pydantic
+        ``ValidationError``: a field that is not even the right type cannot be
+        meaningfully checked for anything else.
+        """
+        errors: list[str] = []
+
         if not self.NEO4J_PASSWORD.get_secret_value().strip():
-            raise ValueError(
+            errors.append(
                 "NEO4J_PASSWORD is not set. There is no default; choose one and set "
                 "it in .env (it must match NEO4J_AUTH in docker-compose.yml)."
             )
-        return self
 
-    @model_validator(mode="after")
-    def _chunks_make_progress(self) -> "Config":
         if self.CHUNK_OVERLAP >= self.CHUNK_SIZE:
             # Otherwise the chunker never advances and loops forever.
-            raise ValueError(
+            errors.append(
                 f"CHUNK_OVERLAP ({self.CHUNK_OVERLAP}) must be smaller than "
                 f"CHUNK_SIZE ({self.CHUNK_SIZE})"
             )
-        return self
 
-    @model_validator(mode="after")
-    def _enforce_sealed_perimeter(self) -> "Config":
         notes: list[str] = []
         for name, schemes in (
             ("LLM_BASE_URL", _HTTP_SCHEMES),
             ("EMBEDDING_BASE_URL", _HTTP_SCHEMES),
             ("NEO4J_URI", _BOLT_SCHEMES),
         ):
-            note = self._check_endpoint(name, getattr(self, name), schemes)
+            try:
+                note = self._check_endpoint(name, getattr(self, name), schemes)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
             if note:
                 notes.append(note)
+
+        if errors:
+            raise ConfigError(errors)
 
         object.__setattr__(self, "perimeter_notes", tuple(notes))
         for note in notes:

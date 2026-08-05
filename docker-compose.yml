@@ -96,6 +96,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # The dev target adds pytest so the suite runs against the real
+      # dependency set. Build production images with --target runtime.
+      target: ${BACKEND_TARGET:-dev}
     image: crowdsight-backend:dev
     container_name: crowdsight-backend
     restart: unless-stopped

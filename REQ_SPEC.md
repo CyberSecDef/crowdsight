@@ -124,9 +124,17 @@ Gate the `frontend` service behind a compose profile until Phase 9 builds it, an
 
 Because an internal network blocks model pulls, provide a separate `docker-compose.provision.yml` overlay that temporarily attaches Ollama to a normal bridge network for one-time `ollama pull` operations. Document that this overlay must never be used at runtime.
 
-**Step 4: Egress guard test unit**
+**Step 4: Egress guard test unit** ✅
 **Tests:** `tests/test_config_validation.py` — asserts loopback and service-name URLs are accepted silently; that private/link-local addresses are accepted but emit a `PerimeterWarning` and populate `perimeter_notes`; that public hostnames, raw public IPs, off-box `https://` URLs, cloud Neo4j URIs and wrong schemes all raise `ConfigError`; that a missing required variable (`NEO4J_PASSWORD`) fails loudly rather than defaulting silently; and that field constraints (`MAX_ROUNDS >= 1`, `0.0 <= REPORT_TEMPERATURE <= 2.0`, `CHUNK_OVERLAP < CHUNK_SIZE`) reject bad values. Test `classify_host` directly as well — it is the smallest unit the whole guarantee rests on.
-`tests/test_network_isolation.py` — an integration test that execs inside the backend container and asserts a connection attempt to a known-external host fails (DNS resolution failure or no route). This is the test that proves the "never leaves my network" property; it must be part of CI and not skippable.
+`tests/test_network_isolation.py` — the integration test that proves the "never leaves my network" property. Assert that TCP connections to several known-external addresses fail, that external DNS names do not resolve (a working resolver is a data channel even with no route), that the backend has no default route in `/proc/net/route`, and that `app.egress_check` agrees. Detect the context automatically: run the assertions directly when inside the backend container, or shell in via `docker compose exec` when run from the host.
+
+**It must not skip.** A test that quietly passes by skipping itself when it cannot verify the seal is worse than no test at all — it yields a green run that means nothing. When no verifiable context exists, fail with instructions. Verify this property deliberately: with the stack down the suite must go red, not green.
+
+Topology assertions (`crowdsight_sealed` has `Internal=true`, the backend publishes no ports, the gateway cannot open outbound TCP) are a separate category — they inspect the Docker daemon, which a container has no view of, so they skip in-container with a reason pointing at the host and run for real there. Guard each one against the stack being absent: `docker port` on a container that does not exist prints nothing, which would otherwise pass as "publishes no ports" while asserting nothing.
+
+**Test tooling.** The backend image needs a `dev` build target adding `requirements-dev.txt` on top of `runtime`, with Compose building `dev` by default (`target: ${BACKEND_TARGET:-dev}`). Otherwise `docker compose exec backend pytest` fails — the production image has no pytest. Put `pytest.ini` at `backend/` with `--strict-markers`, `pythonpath = .`, and markers `integration` and `egress`. Do not add a `filterwarnings` entry referencing an application warning class: pytest resolves those before `sys.path` is arranged and the import fails.
+
+CI wiring is deferred to Phase 10 Step 2, which is the egress verification gate.
 
 ---
 
