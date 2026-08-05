@@ -177,6 +177,11 @@ class Config(BaseSettings):
     NEO4J_URI: str = "bolt://neo4j:7687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: SecretStr = SecretStr("")
+    # Community Edition serves a single database; the name is fixed but kept
+    # configurable so an Enterprise deployment can isolate runs per database.
+    NEO4J_DATABASE: str = "neo4j"
+    NEO4J_MAX_POOL_SIZE: int = Field(default=50, ge=1)
+    NEO4J_CONNECTION_TIMEOUT: float = Field(default=30.0, gt=0)
 
     # --- Simulation limits ---------------------------------------------------
     MAX_ROUNDS: int = Field(default=10, ge=1)

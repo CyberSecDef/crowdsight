@@ -187,8 +187,25 @@ Configuration added here: `EMBEDDING_DIM` (768), `EMBEDDING_BATCH_SIZE` (32), `E
 
 **API note.** Let an explicitly passed `cache=None` mean "no cache", distinct from the argument being omitted. Collapsing the two makes caching impossible to disable and leaks a shared on-disk cache into anything that tries — including tests, where it silently carries state between cases.
 
-**Step 4: Neo4j storage layer**
+**Step 4: Neo4j storage layer** ✅
 Build `backend/app/storage/neo4j_storage.py` (connection pooling, session management, parameterised Cypher only — never string interpolation) and `neo4j_schema.py` (constraints and indexes: uniqueness on entity UUID, index on entity type and name, vector index on the embedding property if the Neo4j version supports it, otherwise cosine similarity computed in-process).
+
+**Async driver**, matching the LLM and embedding clients, so Phase 3 can embed and write without a thread hop and Phase 6 binds directly into OASIS. One `Neo4jStorage` per process — the driver owns the connection pool, and constructing one per request defeats pooling entirely. Materialise records before the session closes; a lazily consumed result raises after the session is gone, and callers should not have to know that.
+
+**Parameterisation is not only about injection**, though a document naming an entity `'); MATCH (n) DETACH DELETE n //` is exactly what this system ingests. Neo4j plans by query text, so interpolating values produces a distinct plan per value and evicts the query cache.
+
+Cypher genuinely cannot parameterise labels or relationship types. `escape_identifier` is the only sanctioned route: it *validates* against `^[A-Za-z_][A-Za-z0-9_]{0,62}$` rather than escaping, because a generated ontology proposing `My Label; DROP` is a defect to surface, not a string to quietly sanitise.
+
+Provide `audit_cypher_sources`, a repo-wide check that no Cypher is built by interpolation, so Step 5 can assert that as an invariant rather than hope for it. Two things it must get right, both learned by getting them wrong first:
+
+- **Work on the AST, not line by line.** A query built from implicitly concatenated strings is one expression spanning several lines, and its range stops before the closing parenthesis — so a trailing `# cypher-audit: ok` falls outside it. Exempt the *smallest enclosing statement* of each marker, which covers the trailing case without letting a marker buried in a function body exempt the whole function.
+- **Match Cypher-only keywords.** `WHERE`, `CREATE` and `SET` are shared with SQL, and matching them flags the embedding cache's own parameterised SQL. Use `MATCH`, `MERGE`, `UNWIND`, `YIELD`, `DETACH`, `RETURN`, and the schema DDL forms.
+
+**Establish vector-index support by trying, not by parsing a version string.** Attempt the creation, then read `SHOW INDEXES` back and confirm the type is `VECTOR`. A version check encodes an assumption about which builds have the feature; the server can answer the question directly. When unavailable, fall back to in-process cosine similarity and return **the same row shape** in both modes so no caller branches on which one ran. The native index cannot be scoped to a graph, so when filtering by `graph_id`, over-fetch and filter — asking for exactly `limit` returns too few.
+
+`cosine_similarity` must return `0.0` for a zero-magnitude vector rather than dividing by zero: an all-zero embedding means the model failed, and a NaN propagating through a ranking turns that into a much stranger bug much later.
+
+Configuration added here: `NEO4J_DATABASE` (`neo4j`), `NEO4J_MAX_POOL_SIZE` (50), `NEO4J_CONNECTION_TIMEOUT` (30 s).
 
 **Step 5: Service client test units**
 **Tests:** `tests/test_llm_client.py` — mock the HTTP layer; assert correct base URL is used, that fenced JSON is stripped, that the repair loop retries on malformed JSON and succeeds on a subsequent valid response, and that it raises `LLMJSONError` after exhausting retries.

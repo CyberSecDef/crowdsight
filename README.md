@@ -312,6 +312,9 @@ docker compose exec backend python -m app.config
 | `NEO4J_URI` | `bolt://neo4j:7687` |
 | `NEO4J_USER` | `neo4j` |
 | `NEO4J_PASSWORD` | **none — you must set this** |
+| `NEO4J_DATABASE` | `neo4j` |
+| `NEO4J_MAX_POOL_SIZE` | `50` |
+| `NEO4J_CONNECTION_TIMEOUT` | `30` seconds |
 | `MAX_ROUNDS` | `10` |
 | `MAX_AGENTS` | `100` |
 | `REPORT_TEMPERATURE` | `0.5` |
