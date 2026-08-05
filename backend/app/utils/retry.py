@@ -268,6 +268,11 @@ def get_llm_gate(limit: int | None = None) -> ConcurrencyGate:
     Chat completions and embeddings share it deliberately: they contend for
     the same GPU, and bounding them separately would let their sum exceed the
     limit that exists to prevent an OOM.
+
+    Callers holding a :class:`~app.config.Config` should pass its
+    ``LLM_CONCURRENCY``. Falling back to the global config here would mean a
+    service constructed with an explicit configuration still depended on the
+    ambient one — surprising, and untestable without the whole environment.
     """
     global _llm_gate
     with _llm_gate_lock:

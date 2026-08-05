@@ -196,7 +196,7 @@ class EmbeddingService:
         self.batch_size = batch_size or self.config.EMBEDDING_BATCH_SIZE
         self.retry_policy = retry_policy or self.config.llm_retry_policy()
         # Shared with the LLM client: both contend for the same GPU.
-        self._gate = gate or get_llm_gate()
+        self._gate = gate or get_llm_gate(self.config.LLM_CONCURRENCY)
         self._owns_http = http is None
         self._http = http or httpx.AsyncClient(
             base_url=self.config.EMBEDDING_BASE_URL.rstrip("/"),

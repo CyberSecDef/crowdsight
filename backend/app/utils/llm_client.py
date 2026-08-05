@@ -236,7 +236,7 @@ class LLMClient:
         # Shared with the embedding service: both contend for the same GPU, so
         # bounding them separately would let their sum exceed the limit that
         # exists to prevent an OOM.
-        self._gate = gate or get_llm_gate()
+        self._gate = gate or get_llm_gate(self.config.LLM_CONCURRENCY)
         self._owns_client = client is None
         # Split timeouts. Generation legitimately takes minutes; a connection
         # either establishes at once or is not going to, and a 300s connect

@@ -32,7 +32,11 @@ import pytest
 
 from tests.conftest import in_container
 
-pytestmark = [pytest.mark.egress, pytest.mark.integration]
+# `egress` only, deliberately not `integration`. Integration tests are
+# deselected by default so the unit loop needs no services; the seal proof must
+# not inherit that, because a check you have to remember to ask for is one that
+# eventually nobody asks for.
+pytestmark = [pytest.mark.egress]
 
 # Deliberately boring, highly available destinations. If any is reachable the
 # seal is broken; the specific host does not matter.

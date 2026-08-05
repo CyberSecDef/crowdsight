@@ -346,10 +346,15 @@ defaulting silently, and every problem is reported at once rather than one per r
 ## Testing
 
 ```bash
-docker compose exec backend pytest                     # everything
-docker compose exec backend pytest -m "not integration" # fast unit suite
-pytest backend/tests/test_network_isolation.py         # from the host, stack running
+docker compose exec backend pytest                  # unit + egress, no services needed
+docker compose exec backend pytest -m integration   # Neo4j-backed; needs neo4j up
+docker compose exec backend pytest -m ""            # everything
+pytest backend/tests/test_network_isolation.py      # from the host, stack running
 ```
+
+`integration` is deselected by default so the unit loop stays fast. `egress` is **not** —
+a check you have to remember to ask for is one that eventually nobody asks for. Neither
+skips to pass: stop Neo4j and `pytest -m integration` errors rather than going green.
 
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.

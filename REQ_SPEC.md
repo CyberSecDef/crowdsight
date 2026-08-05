@@ -207,10 +207,16 @@ Provide `audit_cypher_sources`, a repo-wide check that no Cypher is built by int
 
 Configuration added here: `NEO4J_DATABASE` (`neo4j`), `NEO4J_MAX_POOL_SIZE` (50), `NEO4J_CONNECTION_TIMEOUT` (30 s).
 
-**Step 5: Service client test units**
-**Tests:** `tests/test_llm_client.py` — mock the HTTP layer; assert correct base URL is used, that fenced JSON is stripped, that the repair loop retries on malformed JSON and succeeds on a subsequent valid response, and that it raises `LLMJSONError` after exhausting retries.
+**Step 5: Service client test units** ✅
+**Tests:** `tests/test_llm_client.py` — mock the HTTP layer with `respx`, not by substituting the client object. Intercepting real HTTP exercises the actual SDK path — the base URL it builds, the payload it serialises, the response it parses — whereas a stub only proves the code calls the stub. Assert the correct local base URL is used, that fenced and prose-wrapped JSON is salvaged **without** a second round trip, that the repair loop recovers from both malformed JSON and schema violations, and that it raises `LLMJSONError` carrying every raw response after exhausting attempts.
 `tests/test_embedding_service.py` — assert vector dimensionality is 768, batching splits correctly, and the cache returns without a second HTTP call.
-`tests/test_neo4j_storage.py` — against an ephemeral Neo4j (testcontainers or a dedicated test database); assert schema creation is idempotent, CRUD round-trips, and that all queries are parameterised.
+`tests/test_neo4j_storage.py` — against a live Neo4j; assert schema creation is idempotent, CRUD round-trips, and that all queries are parameterised.
+
+**Not testcontainers.** It needs Docker socket access from inside the backend container, and granting that would punch a hole in the sealed design for the sake of a test fixture. Use the Compose `neo4j` service instead, isolating each run under a unique `graph_id` namespace and deleting it in fixture teardown — Community Edition serves exactly one database, so namespacing is the available form of isolation. This also exercises the same server the application uses.
+
+Mark only the server-dependent tests `integration`. The identifier, source-audit and cosine tests read files or do arithmetic; excluding them from the default run buys nothing and loses coverage.
+
+**Marker policy.** `integration` is deselected by default so the unit loop stays fast and needs no services; `egress` is not, because a check you have to remember to ask for is one that eventually nobody asks for. Neither ever skips to pass: with Neo4j stopped, `pytest -m integration` must error, and it does.
 `tests/test_retry.py` — assert backoff timing, retry ceiling, and that the concurrency semaphore is respected.
 
 ---
