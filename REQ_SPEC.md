@@ -1,16 +1,15 @@
-# Shoal — Local Swarm Simulation Engine
+# CrowdSight — Local Swarm Simulation Engine
 
 > Build-from-scratch requirements specification.
-> Working name "Shoal" (a group of fish) — rename freely.
 > Functionally equivalent to MiroFish, but built clean and running entirely on local infrastructure.
 
 ---
 
 ## Overview
 
-Shoal is a swarm-intelligence simulation and prediction engine. You give it a source document — a news article, a policy draft, a product announcement, an incident report — and it builds a knowledge graph of the entities and relationships inside it. From that graph it generates a population of hundreds of distinct AI agents, each with its own persona, memory, and behavioural disposition. Those agents are then placed in a simulated social platform (Twitter-style or Reddit-style) and allowed to run for a configurable number of rounds, during which they post, comment, like, repost, follow, search, and react to one another. The result is not a statistical forecast but a *simulated collective reaction*: what a population of plausible individuals would say and do in response to the event, how sentiment clusters and shifts, which sub-narratives take hold, and which agents become influential.
+CrowdSight is a swarm-intelligence simulation and prediction engine. You give it a source document — a news article, a policy draft, a product announcement, an incident report — and it builds a knowledge graph of the entities and relationships inside it. From that graph it generates a population of hundreds of distinct AI agents, each with its own persona, memory, and behavioural disposition. Those agents are then placed in a simulated social platform (Twitter-style or Reddit-style) and allowed to run for a configurable number of rounds, during which they post, comment, like, repost, follow, search, and react to one another. The result is not a statistical forecast but a *simulated collective reaction*: what a population of plausible individuals would say and do in response to the event, how sentiment clusters and shifts, which sub-narratives take hold, and which agents become influential.
 
-Shoal is designed for a fully sealed deployment. All inference runs against a local Ollama instance, all graph memory lives in a local Neo4j instance, and all simulation state lives in local SQLite files. There are no cloud services, no external memory providers, and no telemetry. Network egress is denied at the container-network level rather than merely avoided by configuration, so the "nothing leaves the network" property is structurally enforced and independently verifiable, not a matter of trusting a config file. The only step requiring internet access is one-time provisioning (pulling model weights and Python/npm packages), after which the stack runs sealed.
+CrowdSight is designed for a fully sealed deployment. All inference runs against a local Ollama instance, all graph memory lives in a local Neo4j instance, and all simulation state lives in local SQLite files. There are no cloud services, no external memory providers, and no telemetry. Network egress is denied at the container-network level rather than merely avoided by configuration, so the "nothing leaves the network" property is structurally enforced and independently verifiable, not a matter of trusting a config file. The only step requiring internet access is one-time provisioning (pulling model weights and Python/npm packages), after which the stack runs sealed.
 
 ---
 
@@ -319,7 +318,7 @@ Health endpoint reporting Ollama reachability, Neo4j connectivity, model availab
 ### One-time provisioning (requires internet)
 
 ```bash
-git clone <your-repo> shoal && cd shoal
+git clone https://github.com/CyberSecDef/crowdsight && cd crowdsight
 cp .env.example .env          # defaults are already local-only; set NEO4J_PASSWORD
 
 # Temporarily attach Ollama to a routable network and pull models
@@ -350,7 +349,7 @@ Open `http://localhost:8080`.
 ### Verifying nothing left your network
 
 ```bash
-docker network inspect shoal_internal | grep -i internal    # expect: "Internal": true
+docker network inspect crowdsight_internal | grep -i internal    # expect: "Internal": true
 docker compose exec backend python -c "import socket; socket.create_connection(('1.1.1.1',443),3)"
 # expect failure — no route
 ```
