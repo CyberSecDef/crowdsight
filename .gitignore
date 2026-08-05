@@ -3,8 +3,17 @@
 .env.*
 !.env.example
 
-# Runtime data — uploaded source documents, graphs, run state, generated reports
-data/
+# Runtime data — uploaded source documents, graphs, run state, generated reports.
+# The four directories are tracked (via .gitkeep) so a fresh clone has the
+# skeleton; everything that lands inside them is ignored.
+data/*
+!data/uploads/
+!data/graphs/
+!data/simulations/
+!data/reports/
+data/*/*
+!data/*/.gitkeep
+
 *.db
 *.sqlite
 *.sqlite3

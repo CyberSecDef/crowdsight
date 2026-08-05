@@ -1,0 +1,17 @@
+# CrowdSight — sealed service stack
+#
+# SCAFFOLD ONLY. Written in full by Phase 1, Step 3 ("Sealed container
+# networking"), which defines the four services on a single user-defined bridge
+# network declared `internal: true` — no default gateway, so egress is
+# structurally impossible rather than merely unconfigured.
+#
+# Planned shape:
+#   services: ollama (GPU passthrough, unpublished)
+#             neo4j  (named volume, NEO4J_AUTH, heap settings, unpublished)
+#             backend  -> publishes 5000
+#             frontend -> publishes 8080
+#   networks: internal: {internal: true}
+#
+# Model pulls require a routable network and therefore a separate
+# docker-compose.provision.yml overlay. That overlay must never be used at
+# runtime.

@@ -75,7 +75,7 @@ Any other outbound destination is a defect. There is no API key to a third party
 
 ### Phase 1: Foundation, sealed networking, and the configuration contract
 
-**Step 1: Repository scaffold**
+**Step 1: Repository scaffold** ✅
 Create the project skeleton: `backend/app/{api,services,storage,utils,models}`, `backend/tests`, `frontend/src`, `data/{uploads,graphs,simulations,reports}`, plus `docker-compose.yml`, `Dockerfile`, `.env.example`, `README.md`. Initialise git. Add a `.gitignore` covering `.env`, `data/`, `__pycache__`, `node_modules`, and `*.db`.
 
 **Step 2: The configuration module**
