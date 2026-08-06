@@ -195,6 +195,12 @@ class Config(BaseSettings):
     #: paths on purpose: a population that all reasons identically is not a
     #: population. The spec's figure.
     SIMULATION_TEMPERATURE: float = Field(default=0.7, ge=0.0, le=2.0)
+    #: How many of an agent's own past turns stay in its memory. CAMEL records
+    #: every turn and OASIS never resets, so without a bound each agent's
+    #: context grows for the whole run until the model truncates it invisibly.
+    #: A window keeps personas coherent between rounds at a fixed cost, and
+    #: makes a resumed run's agents the same shape as the interrupted ones.
+    SIMULATION_MEMORY_ROUNDS: int = Field(default=3, ge=0)
     MAX_AGENTS: int = Field(default=100, ge=1)
     #: How many simulations may run at once. The LLM_CONCURRENCY budget is
     #: divided by this at spawn time, so every worker's share is fixed and

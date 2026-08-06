@@ -341,6 +341,7 @@ docker compose exec backend python -m app.config
 | `LLM_CONCURRENCY` | `4` (per process; divided across simulation workers) |
 | `MAX_CONCURRENT_SIMULATIONS` | `2` (the budget is divided by this at spawn) |
 | `API_LLM_RESERVE` | `1` (held back so the API still answers during a run) |
+| `SIMULATION_MEMORY_ROUNDS` | `3` (how many past turns an agent keeps) |
 | `LLM_TIMEOUT` / `LLM_CONNECT_TIMEOUT` | `300` / `10` seconds |
 | `LLM_MAX_ATTEMPTS` | `3` |
 | `LLM_RETRY_BASE_DELAY` / `LLM_RETRY_MAX_DELAY` | `1.0` / `30.0` seconds |

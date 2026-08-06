@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,7 @@ class WorkerState:
         self.finished = False
         self.error = ""
         self.rounds: list[dict[str, Any]] = []
+        self.progress: dict[str, Any] = {}
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -70,9 +72,10 @@ async def run_simulation(
     the process, the control plane, and a clean stop.
     """
     from app.config import get_config
-    from app.services.simulation_ipc import ControlServer, socket_path
-    from app.services.simulation_runner import SimulationRunner
     from app.services.simulation_config_generator import SimulationConfig
+    from app.services.simulation_ipc import ControlServer, socket_path
+    from app.services.simulation_persistence import RoundRecord, RunLedger
+    from app.services.simulation_runner import SimulationRunner
     from app.services.simulation_store import SimulationStore
 
     sim_dir = Path(sim_dir)
@@ -83,12 +86,40 @@ async def run_simulation(
     sim_config = SimulationConfig.load(sim_dir / "config.json")
     state = WorkerState(sim_id, sim_config.rounds)
 
+    database_path = sim_dir / "simulation.db"
+    ledger = RunLedger(database_path)
+
+    # Resume is decided from what is on disk, not from a flag a caller passes:
+    # the checkpoint is the only thing that knows how far the last attempt got.
+    checkpoint = ledger.checkpoint() if database_path.exists() else None
+    resuming = database_path.exists()
+    if resuming:
+        if checkpoint is not None:
+            # The interrupted round is half-applied -- some agents acted,
+            # others never got a turn. Roll back so it can be re-run cleanly.
+            discarded = ledger.rollback_to(checkpoint)
+            state.rounds = [r.to_dict() for r in ledger.rounds()]
+            logger.info("Resuming %s after round %d%s", sim_id, checkpoint.round,
+                        f", discarding {discarded}" if discarded else "")
+        else:
+            # A database with no checkpoint at all: the previous attempt died
+            # between publishing the seed and recording round zero. The seed
+            # posts are already there, and seeding again would publish the
+            # event twice. Roll the whole thing back to empty instead.
+            from app.services.simulation_persistence import RoundRecord as _Empty
+
+            discarded = ledger.rollback_to(_Empty(round=-1, marks={}))
+            logger.warning(
+                "Resuming %s from an unfinished seed; discarding %s",
+                sim_id, discarded or "nothing")
+
     runner = SimulationRunner(
         sim_config,
         sim_dir / "profiles",
-        sim_dir / "simulation.db",
+        database_path,
         config=config,
         concurrency=concurrency,
+        resume=resuming,
     )
 
     server = ControlServer(socket_path(sim_dir))
@@ -97,11 +128,14 @@ async def run_simulation(
         return {"sim_id": sim_id, "pid": os.getpid()}
 
     async def on_status(_request: Any) -> dict[str, Any]:
-        return state.snapshot()
+        snapshot = state.snapshot()
+        snapshot["progress"] = ledger.progress(sim_config.rounds)
+        return snapshot
 
     async def on_stop(_request: Any) -> dict[str, Any]:
         # Graceful: the loop checks between rounds. Killing mid-round would
-        # abandon a partly-applied round with no record of how far it got.
+        # abandon a partly-applied round, which is exactly what the rollback
+        # above exists to clean up.
         state.stop_requested = True
         logger.info("Stop requested for %s at round %d", sim_id, state.round)
         return {"accepted": True, "round": state.round}
@@ -118,20 +152,34 @@ async def run_simulation(
 
     await server.start()
     try:
-        state.stage = "preparing"
+        state.stage = "resuming" if resuming else "preparing"
         await runner.setup()
+        ledger.ensure_schema()
 
-        state.stage = "seeding"
-        state.rounds.append((await runner.seed()).to_dict())
+        done = checkpoint.round if checkpoint else -1
+        runner.advance_clock(max(0, done))
+
+        if done < 0:
+            state.stage = "seeding"
+            marks_before = ledger.marks()
+            summary = await runner.seed()
+            summary.action_counts = ledger.action_counts(marks_before)
+            _checkpoint(ledger, summary)
+            state.rounds.append(summary.to_dict())
 
         state.stage = "running"
-        for index in range(1, sim_config.rounds + 1):
+        for index in range(max(1, done + 1), sim_config.rounds + 1):
             if state.stop_requested:
                 state.stage = "stopped"
                 logger.info("Stopping %s before round %d", sim_id, index)
                 break
             state.round = index
+            marks_before = ledger.marks()
             summary = await runner.run_round(index)
+            summary.action_counts = ledger.action_counts(marks_before)
+            # Written only after the round completes: a checkpoint for a round
+            # that did not finish would be a lie the resume then trusts.
+            _checkpoint(ledger, summary)
             state.rounds.append(summary.to_dict())
         else:
             state.stage = "complete"
@@ -148,10 +196,24 @@ async def run_simulation(
         _record_outcome(store, sim_id, failed=False)
     finally:
         state.finished = True
+        state.progress = ledger.progress(sim_config.rounds)
         await runner.close()
         await server.close()
 
     return state.snapshot()
+
+
+def _checkpoint(ledger: Any, summary: Any) -> None:
+    """Persist one completed round and the boundary it ended at."""
+    from app.services.simulation_persistence import RoundRecord
+
+    ledger.record_round(RoundRecord(
+        round=summary.index,
+        ended_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        invoked=summary.invoked, acted=summary.acted, failed=summary.failed,
+        skipped=summary.skipped, events_fired=summary.events_fired,
+        action_counts=summary.action_counts, failures=summary.failures,
+    ))
 
 
 def _record_outcome(store: Any, sim_id: str, *, failed: bool) -> None:

@@ -62,6 +62,7 @@ __all__ = [
     "SimulationRunner",
     "build_model",
     "harden_agent",
+    "trim_agent_memory",
 ]
 
 #: Sentinel for the broadcaster's slot in our own records. The agent's real
@@ -151,6 +152,8 @@ class RoundSummary:
     failed: int = 0
     skipped: int = 0
     events_fired: int = 0
+    #: What the agents actually did, counted from OASIS's trace table.
+    action_counts: dict[str, int] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
 
     @property
@@ -161,7 +164,8 @@ class RoundSummary:
         return {
             "round": self.index, "invoked": self.invoked, "acted": self.acted,
             "failed": self.failed, "skipped": self.skipped,
-            "events_fired": self.events_fired, "failures": self.failures[:20],
+            "events_fired": self.events_fired, "action_counts": self.action_counts,
+            "failures": self.failures[:20],
         }
 
 
@@ -194,6 +198,49 @@ def harden_agent(agent: "SocialAgent", summary_ref: list[RoundSummary]) -> None:
     agent._crowdsight_hardened = True  # type: ignore[attr-defined]
 
 
+def trim_agent_memory(agent: "SocialAgent", keep_turns: int) -> int:
+    """Bound one agent's memory to its most recent turns.
+
+    CAMEL records both sides of every turn and OASIS never resets, so an
+    agent's context grows for the whole run. Trimming keeps cost per round flat
+    and makes a resumed run's agents the same shape as the ones it replaced —
+    a fresh process has no memory at all, so an unbounded run could never be
+    resumed faithfully.
+
+    Trimmed at user-message boundaries: a tool result whose preceding assistant
+    tool-call has been dropped is rejected by the completions API, so slicing
+    blindly would break the very next turn.
+    """
+    if keep_turns <= 0:
+        return 0
+    try:
+        from camel.types import OpenAIBackendRole
+
+        records = [context.memory_record for context in agent.memory.retrieve()]
+    except Exception:  # noqa: BLE001 - never fail a run over bookkeeping
+        logger.debug("Could not read memory for agent %s", agent.social_agent_id)
+        return 0
+
+    system = [r for r in records if r.role_at_backend == OpenAIBackendRole.SYSTEM]
+    rest = [r for r in records if r.role_at_backend != OpenAIBackendRole.SYSTEM]
+
+    # Each turn is a user message plus whatever it produced.
+    starts = [i for i, r in enumerate(rest)
+              if r.role_at_backend == OpenAIBackendRole.USER]
+    if len(starts) <= keep_turns:
+        return 0
+
+    kept = rest[starts[-keep_turns]:]
+    dropped = len(rest) - len(kept)
+    try:
+        agent.memory.clear()
+        agent.memory.write_records(system + kept)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not trim memory for agent %s", agent.social_agent_id)
+        return 0
+    return dropped
+
+
 # --------------------------------------------------------------------------
 # The runner
 # --------------------------------------------------------------------------
@@ -215,12 +262,15 @@ class SimulationRunner:
         config: Config | None = None,
         concurrency: int | None = None,
         rng_seed: int | None = None,
+        resume: bool = False,
     ) -> None:
         self.config = config or get_config()
         self.sim_config = sim_config
         self.profiles_dir = Path(profiles_dir)
         self.database_path = Path(database_path)
         self.concurrency = concurrency or self.config.LLM_CONCURRENCY
+        self.resume = resume
+        self.memory_rounds = self.config.SIMULATION_MEMORY_ROUNDS
         self.action_space: ActionSpace = (
             sim_config.action_space or default_action_space(sim_config.platform)
         )
@@ -370,11 +420,13 @@ class SimulationRunner:
         # until then, run them one at a time.
         os.environ["OASIS_DB_PATH"] = str(self.database_path)
 
-        if self.database_path.exists():
-            # OASIS appends; a stale file silently mixes two runs together.
+        if self.database_path.exists() and not self.resume:
+            # OASIS appends rather than replacing: `create_db` reports "table
+            # already exists" to stdout and carries on with the old data. A
+            # stale file would silently mix two runs together.
             raise SimulationError(
-                f"{self.database_path} already exists. Resuming is Step 3; "
-                f"delete it to start over."
+                f"{self.database_path} already exists. Pass resume=True to "
+                f"continue that run, or delete it to start over."
             )
 
         graph = await self.build_agent_graph()
@@ -478,10 +530,28 @@ class SimulationRunner:
         finally:
             self._current.pop()
 
+        trimmed = sum(trim_agent_memory(agent, self.memory_rounds)
+                      for _, agent in self.agent_graph.get_agents()) \
+            if self.agent_graph is not None else 0
+        if trimmed:
+            logger.debug("Trimmed %d memory record(s) after round %d", trimmed, index)
+
         self.rounds_run.append(summary)
         logger.info("Round %d: %d acted, %d quiet, %d failed",
                     index, summary.acted, summary.skipped, summary.failed)
         return summary
+
+    def advance_clock(self, rounds_done: int) -> None:
+        """Move the sandbox clock past rounds that already happened.
+
+        A resumed run gets a fresh ``Clock`` starting at step zero, so new
+        posts would carry timestamps earlier than ones already in the database
+        — and the Twitter recommender orders by recency.
+        """
+        clock = getattr(getattr(self.env, "platform", None), "sandbox_clock", None)
+        if clock is not None and hasattr(clock, "time_step"):
+            clock.time_step = max(int(clock.time_step), int(rounds_done))
+            logger.info("Sandbox clock advanced to step %d", clock.time_step)
 
     async def run(self, rounds: int | None = None) -> list[RoundSummary]:
         """Seed, then run every round. Step 3 adds persistence between them."""

@@ -604,8 +604,22 @@ Divided by the *maximum* number of concurrent runs rather than the current numbe
 
 **Tests:** `tests/test_process_isolation.py` (named in the spec under Step 6), 30 tests, all against real spawned processes.
 
-**Step 3: Round loop and persistence**
+**Step 3: Round loop and persistence** ✅
 Drive the OASIS environment round by round. After each round, persist agent actions, posts, and comments to the run's SQLite database, and write a checkpoint enabling resume. Emit structured progress: current round, total rounds, per-action counts, agents active.
+
+Implemented in `simulation_persistence.py`, with the round loop in `simulation_worker.py`. Verified by killing a real running simulation with SIGKILL and resuming it: 15/15 checks, every round present exactly once.
+
+**OASIS already persists the actions, posts and comments — what it never records is *when*.** There is no round column anywhere in its schema, and `created_at` is a sandbox clock that restarts at zero in a fresh process. Rather than duplicating its rows into tables of our own, `RunLedger` records the **boundaries between rounds**: the high-water rowid of every table at the moment each round finished. Every id in the schema is a monotonic rowid, so a row belongs to the round whose range contains it. One extra table, no duplication, OASIS's tables still the source of truth — and a test asserts every tracked table still *has* a usable rowid, since a `WITHOUT ROWID` in some future version would break attribution silently.
+
+**Per-action counts come from OASIS's own `trace` table**, counted over each round's rowid range rather than inferred from what we asked for: an agent may take several actions in one turn or none, and the trace is the only record of what actually landed. A real four-round run reported `{create_post: 4, refresh: 9, repost: 3, quote_post: 3, follow: 1}`.
+
+**The interrupted round is rolled back, not continued.** A run killed mid-round leaves it half-applied — some agents acted, the rest never got a turn. Continuing past it would bake a permanently lopsided round into the data; re-running it without cleaning up would let the agents who already acted act twice. Deleting everything above the last completed round's marks restores a clean boundary, so "resumes without duplicating rounds" means exactly that. Denormalised counters (`post.num_likes` and friends) are recomputed afterwards, because deleting a like does not decrement the counter it fed.
+
+**A bug found by a flaky integration test, not by reading the code.** The resume keyed off the presence of a checkpoint, so a run killed *between publishing the seed and recording round zero* found no checkpoint and seeded again — the event announced twice, and every agent seeing it twice. Resume now keys off the presence of a database and rolls an uncheckpointed one back to empty. The flake also showed the test itself was wrong: it counted seed posts by content, and agents paraphrase the announcement in their own posts, so it could not distinguish a duplicated seed from a population echoing it. It now counts posts attributed to round 0. Four consecutive runs pass.
+
+**Agent memory is bounded to a window** (`SIMULATION_MEMORY_ROUNDS`, default 3). CAMEL records both sides of every turn and OASIS never resets, so each agent's context otherwise grows for the whole run until the model truncates it invisibly — and a resumed run, whose fresh process has no memory at all, could never match an unbounded one. Trimming happens at user-message boundaries: a tool result whose assistant tool-call has been dropped is rejected by the completions API, so slicing blindly would break the very next turn. The sandbox clock is also advanced past completed rounds on resume, or new posts would carry timestamps earlier than ones already stored and the recommender orders by recency.
+
+**Tests:** `tests/test_simulation_persistence.py` (round attribution, marks, action counts, rollback) and `tests/test_simulation_resume.py` (the half-applied round, plus an `integration` test that SIGKILLs a live simulation and resumes it).
 
 **Step 4: Graph memory feedback (optional, flagged)**
 Optionally feed significant simulation outcomes back into the Neo4j graph as new nodes and edges, so agent memory evolves across rounds. Build `backend/app/services/graph_memory_updater.py`. Keep this behind a config flag — it roughly doubles graph writes and materially increases run time. Upstream's equivalent was the single most complex and most-tested subsystem; treat it as genuinely hard and do not attempt it before Phases 1–7 are green.

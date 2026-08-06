@@ -160,7 +160,8 @@ def test_a_summary_serialises_for_progress_reporting():
     payload = RoundSummary(index=2, invoked=5, failed=1, skipped=3,
                            events_fired=1).to_dict()
     assert payload == {"round": 2, "invoked": 5, "acted": 4, "failed": 1,
-                       "skipped": 3, "events_fired": 1, "failures": []}
+                       "skipped": 3, "events_fired": 1, "action_counts": {},
+                       "failures": []}
 
 
 def test_a_flood_of_failures_does_not_bloat_the_progress_payload():
