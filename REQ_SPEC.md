@@ -464,8 +464,23 @@ That import costs ~4 s, paid once per session via a module-scoped fixture. It ru
 
 ### Phase 5: Simulation configuration generation
 
-**Step 1: Scenario derivation**
+**Step 1: Scenario derivation** ✅
 Build `backend/app/services/simulation_config_generator.py`. From the graph and the source document, have the LLM derive: the triggering event description, a simulated time window and round cadence, the initial seed posts that introduce the event, and any scheduled mid-simulation events (a follow-up announcement, a rebuttal, a leak).
+
+**OASIS forces the attribution question.** `env.step()` takes `dict[SocialAgent, ManualAction]` — every post comes from an agent, and there is no platform-level injection. A seed post must therefore be attributed to somebody, and attributing an invented statement to a real named person is the fabrication problem Phase 4 exists to prevent. Allow exactly two attributions:
+
+- **broadcaster** — a synthetic account invented for the run, its name checked against every entity the graph holds. Anything the model writes goes here.
+- **named_quote** — a line the document *actually contains*, posted by the agent for the person who said it. Reproducing what someone genuinely said is not fabrication. Record the source offsets so the quote stays checkable.
+
+**Verify the quote; do not trust the label.** Search the document for the text, normalising whitespace and case but nothing else, and require a minimum length so a fragment like "the plan" cannot serve as evidence. A claimed quote that cannot be located is **demoted to the broadcaster** — not dropped, since the content is still a reasonable way to introduce the event, and not trusted, since a paraphrase attributed to a real person is the whole thing being avoided. Record the demotion reason in the config.
+
+This is not hypothetical. On the first real run against `qwen2.5:14b`, the model attributed two paraphrases to real people — one to a residents association, one to a named director — and both were demoted. A generator that took the `named_quote` label at face value would have published both as quotations.
+
+**Scheduled mid-run events are counterfactual and disabled by default.** A leak or rebuttal that never happened changes what the run measures, and a reader of the report has no reason to suspect it. Generate them, mark `counterfactual: true`, and leave `enabled: false` until an operator turns them on in Step 3's review, so a baseline run reflects the document alone.
+
+Drop events scheduled past the final round rather than letting them silently never fire, and clamp the round count to `MAX_ROUNDS`.
+
+Normalise the broadcaster's name and handle rather than merely filling them: models return handles that already carry an `@` (producing `@@RB_Echo` when a display layer adds its own) and put the `@` in the display name just as often.
 
 **Step 2: Action space configuration**
 Define the permitted action set per platform, matching OASIS's supported actions. Twitter: `CREATE_POST, LIKE_POST, REPOST, FOLLOW, QUOTE_POST, DO_NOTHING`. Reddit: `LIKE_POST, DISLIKE_POST, CREATE_POST, CREATE_COMMENT, LIKE_COMMENT, DISLIKE_COMMENT, SEARCH_POSTS, SEARCH_USER, TREND, REFRESH, FOLLOW, MUTE, DO_NOTHING`. Include `DO_NOTHING` — populations that always act are unrealistic and inflate cost.
