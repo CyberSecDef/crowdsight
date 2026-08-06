@@ -30,6 +30,7 @@ from app.storage.neo4j_storage import Neo4jStorage, StorageError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CHUNK_VECTOR_INDEX_NAME",
     "ENTITY_LABEL",
     "SchemaReport",
     "apply_schema",
@@ -40,7 +41,9 @@ __all__ = [
 ]
 
 ENTITY_LABEL = "Entity"
+CHUNK_LABEL = "Chunk"
 VECTOR_INDEX_NAME = "entity_embedding_vec"
+CHUNK_VECTOR_INDEX_NAME = "chunk_embedding_vec"
 
 # Uniqueness first: it is the one that protects correctness rather than speed.
 CONSTRAINTS: tuple[tuple[str, str], ...] = (
@@ -94,7 +97,9 @@ class SchemaReport:
     constraints: list[str] = field(default_factory=list)
     indexes: list[str] = field(default_factory=list)
     vector_index: str | None = None
+    chunk_vector_index: str | None = None
     vector_search_available: bool = False
+    chunk_vector_search_available: bool = False
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -125,11 +130,15 @@ async def apply_schema(
         await storage.write(statement)
         report.indexes.append(name)
 
-    created = await _create_vector_index(storage, dimensions)
-    if created:
+    if await _create_vector_index(storage, VECTOR_INDEX_NAME, ENTITY_LABEL, dimensions):
         report.vector_index = VECTOR_INDEX_NAME
         report.vector_search_available = True
-    else:
+    if await _create_vector_index(
+        storage, CHUNK_VECTOR_INDEX_NAME, CHUNK_LABEL, dimensions
+    ):
+        report.chunk_vector_index = CHUNK_VECTOR_INDEX_NAME
+        report.chunk_vector_search_available = True
+    if not report.vector_search_available:
         report.notes.append(
             "Server does not support native vector indexes; similarity search "
             "will compute cosine distance in-process, which is slower on large "
@@ -140,10 +149,12 @@ async def apply_schema(
     return report
 
 
-async def _create_vector_index(storage: Neo4jStorage, dimensions: int) -> bool:
+async def _create_vector_index(
+    storage: Neo4jStorage, name: str, label: str, dimensions: int
+) -> bool:
     statement = (
-        f"CREATE VECTOR INDEX {VECTOR_INDEX_NAME} IF NOT EXISTS "
-        f"FOR (e:{ENTITY_LABEL}) ON (e.embedding) "
+        f"CREATE VECTOR INDEX {name} IF NOT EXISTS "
+        f"FOR (n:{label}) ON (n.embedding) "
         f"OPTIONS {{ indexConfig: {{ "
         f"`vector.dimensions`: $dimensions, "
         f"`vector.similarity_function`: 'cosine' }} }}"
@@ -151,12 +162,14 @@ async def _create_vector_index(storage: Neo4jStorage, dimensions: int) -> bool:
     try:
         await storage.write(statement, dimensions=dimensions)
     except StorageError as exc:
-        logger.warning("Native vector index unavailable (%s)", exc)
+        logger.warning("Native vector index %s unavailable (%s)", name, exc)
         return False
-    return await supports_vector_index(storage)
+    return await supports_vector_index(storage, name)
 
 
-async def supports_vector_index(storage: Neo4jStorage) -> bool:
+async def supports_vector_index(
+    storage: Neo4jStorage, name: str = VECTOR_INDEX_NAME
+) -> bool:
     """True when the vector index exists and is usable.
 
     Established by reading it back rather than by inspecting a version string:
@@ -166,7 +179,7 @@ async def supports_vector_index(storage: Neo4jStorage) -> bool:
     try:
         rows = await storage.read(
             "SHOW INDEXES YIELD name, type WHERE name = $name RETURN name, type",
-            name=VECTOR_INDEX_NAME,
+            name=name,
         )
     except StorageError:
         return False
@@ -175,7 +188,7 @@ async def supports_vector_index(storage: Neo4jStorage) -> bool:
 
 async def drop_schema(storage: Neo4jStorage) -> None:
     """Remove everything this module creates. For tests and re-provisioning."""
-    for name in (VECTOR_INDEX_NAME,):
+    for name in (VECTOR_INDEX_NAME, CHUNK_VECTOR_INDEX_NAME):
         try:
             await storage.write(f"DROP INDEX {name} IF EXISTS")  # cypher-audit: ok - module constant
         except StorageError:  # pragma: no cover - already absent

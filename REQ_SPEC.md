@@ -321,8 +321,23 @@ Offer `replace=True` to drop the graph first, for when re-extraction should remo
 
 Extend the schema (Phase 2 Step 4) with uniqueness constraints on `Chunk.uuid` and `Document.graph_id` and an index on `Chunk.graph_id`. Idempotency depends on those constraints existing.
 
-**Step 6: Graph query and search**
-Build `backend/app/storage/search_service.py` and `graph_storage.py` supporting: fetch entities by graph, by type, by UUID; semantic search by embedding similarity; and neighbourhood traversal to depth N.
+**Step 6: Graph query and search** ✅
+Build `backend/app/storage/search_service.py` and `graph_storage.py` supporting: fetch entities by graph, by type, by UUID; search; and neighbourhood traversal to depth N.
+
+**Search must be hybrid, not "semantic search by embedding similarity" alone.** Step 4 measured that `nomic-embed-text` cannot discriminate short entity names — `Eastgate` and `Eastgate corridor` score 0.856, above genuine aliases at 0.74 — and a pure vector search inherits that exactly. Typing a name visible in the graph and not getting it back is the commonest search there is. So run two arms and merge:
+
+- **Lexical** over name, normalised form and aliases, ranked exact → prefix → alias → substring. Deterministic, and the only arm that reliably answers "find the entity called X".
+- **Vector** for what lexical cannot answer at all: "who objected to the timetable".
+
+Lexical ranks first, and every hit records `matched_by` so a ranking can be explained rather than just presented. The two score scales are not comparable, which is precisely why the arms are ordered rather than blended.
+
+**Search passages too, and embed chunks during graph construction to make it possible.** Phase 8 must ground report claims in source text, and a claim about a theme has no entity to start from — traversing from entities would never reach it. Store chunk vectors on `:Chunk` and add a second vector index. Slice hit text from the stored document by offset rather than storing it twice.
+
+**Scope every query to `graph_id`.** One Neo4j instance holds many documents, and a query that forgets the scope silently returns another document's entities — which looks like a modelling problem for a long time before anyone suspects the query.
+
+**Cap traversal, and say when you have.** A neighbourhood query on a well-connected node can reach most of a large graph, and a visualisation asked to render that hangs. Clamp depth (1–5) and node count, and return a `truncated` flag rather than quietly returning a prefix. Constrain paths to `:Entity` nodes throughout, or traversal hops through `:Chunk` and two people mentioned in the same passage become neighbours — which makes almost everything adjacent.
+
+Depth cannot be parameterised in Cypher's `*1..n`, so it is interpolated from a clamped integer, with an audit marker.
 
 **Step 7: Graph API**
 Build `backend/app/api/graph.py`: `POST /api/graph/upload` (accept file, return `graph_id` and async `task_id`), `GET /api/graph/status/<task_id>`, `GET /api/graph/<graph_id>/entities` (filter by type, paginate), `GET /api/graph/<graph_id>/entities/<uuid>`, `GET /api/graph/<graph_id>/subgraph` (for visualisation), `DELETE /api/graph/<graph_id>`.

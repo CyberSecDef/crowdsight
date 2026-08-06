@@ -44,6 +44,8 @@ from app.config import Config, get_config
 from app.services.ontology_generator import Ontology
 from app.storage.ner_extractor import Entity, ExtractionResult, Relationship
 from app.storage.neo4j_schema import apply_schema
+from app.storage.embedding_service import EmbeddingService
+from app.storage.graph_storage import document_path, graph_dir, ontology_path
 from app.storage.neo4j_storage import Neo4jStorage, escape_identifier
 from app.utils.chunker import Chunk
 from app.utils.file_parser import ParsedDocument
@@ -98,21 +100,27 @@ class GraphBuilder:
         config: Config | None = None,
         *,
         data_dir: str | Path | None = None,
+        embeddings: EmbeddingService | None = None,
     ) -> None:
         self.config = config or get_config()
         self.storage = storage
-        self.data_dir = Path(data_dir) if data_dir else Path("data/graphs")
+        self.data_dir = Path(data_dir) if data_dir else None
+        # Optional: without it, chunks persist without vectors and passage
+        # search simply finds nothing rather than failing.
+        self.embeddings = embeddings
 
     # -- paths --------------------------------------------------------------
+    # The layout is defined once, in graph_storage, because the search service
+    # reads these same files.
 
     def graph_dir(self, graph_id: str) -> Path:
-        return self.data_dir / graph_id
+        return graph_dir(graph_id, self.data_dir)
 
     def document_path(self, graph_id: str) -> Path:
-        return self.graph_dir(graph_id) / "document.txt"
+        return document_path(graph_id, self.data_dir)
 
     def ontology_path(self, graph_id: str) -> Path:
-        return self.graph_dir(graph_id) / "ontology.json"
+        return ontology_path(graph_id, self.data_dir)
 
     # -- build --------------------------------------------------------------
 
@@ -182,6 +190,13 @@ class GraphBuilder:
         )
 
     async def _write_chunks(self, graph_id: str, chunks: Sequence[Chunk]) -> int:
+        vectors: list[list[float] | None] = [None] * len(chunks)
+        if self.embeddings is not None and chunks:
+            # One batched pass. Passage search needs these, and Phase 8 grounds
+            # its citations on them.
+            embedded = await self.embeddings.embed_texts([c.text for c in chunks])
+            vectors = list(embedded)
+
         rows = [
             {
                 "uuid": derive_uuid(graph_id, "chunk", str(chunk.index)),
@@ -190,14 +205,17 @@ class GraphBuilder:
                 "start": chunk.start,
                 "end": chunk.end,
                 "length": len(chunk),
+                "embedding": vector,
             }
-            for chunk in chunks
+            for chunk, vector in zip(chunks, vectors)
         ]
         await self.storage.run_batch(
             "UNWIND $rows AS row "
             "MERGE (c:Chunk {uuid: row.uuid}) "
             "SET c.graph_id = row.graph_id, c.index = row.index, "
             "    c.start = row.start, c.end = row.end, c.length = row.length "
+            "FOREACH (_ IN CASE WHEN row.embedding IS NULL THEN [] ELSE [1] END | "
+            "    SET c.embedding = row.embedding) "
             "WITH c, row "
             "MATCH (d:Document {graph_id: row.graph_id}) "
             "MERGE (c)-[:PART_OF]->(d)",
