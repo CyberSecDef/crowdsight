@@ -172,6 +172,12 @@ class Config(BaseSettings):
     EMBEDDING_BATCH_SIZE: int = Field(default=32, ge=1)
     EMBEDDING_CACHE_PATH: str = "data/cache/embeddings.db"
     EMBEDDING_CACHE_ENABLED: bool = True
+    # Cosine threshold for folding near-duplicate entities together. High on
+    # purpose: measured against nomic-embed-text, "Mayor Alan Reyes"/"Alan
+    # Reyes" scores 0.839 while "Jane Doe"/"John Doe" scores 0.813, so a
+    # permissive threshold fuses distinct people. Name normalisation does the
+    # real work; this is a guarded safety net.
+    ENTITY_SIMILARITY_THRESHOLD: float = Field(default=0.90, ge=0.0, le=1.0)
 
     # --- Knowledge graph (local Neo4j) --------------------------------------
     NEO4J_URI: str = "bolt://neo4j:7687"

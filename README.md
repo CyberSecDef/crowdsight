@@ -319,6 +319,7 @@ docker compose exec backend python -m app.config
 | `EMBEDDING_BATCH_SIZE` | `32` |
 | `EMBEDDING_CACHE_PATH` | `data/cache/embeddings.db` |
 | `EMBEDDING_CACHE_ENABLED` | `true` |
+| `ENTITY_SIMILARITY_THRESHOLD` | `0.90` |
 | `NEO4J_URI` | `bolt://neo4j:7687` |
 | `NEO4J_USER` | `neo4j` |
 | `NEO4J_PASSWORD` | **none — you must set this** |

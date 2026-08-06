@@ -268,8 +268,34 @@ Temperature should be low (0.2). This is a structuring task, and creativity show
 
 Verified against the real `qwen2.5:14b` on GPU: a 1247-character council housing draft produced 5 entity types (`Councillor`, `Organisation`, `PolicyDocument`, `Person`, `AmendmentProposal`) and 7 relationship types (`CHAIR_OF`, `WORKS_FOR`, `PUBLISHES`, `OPPOSES`, `DEFENDS`, `WELCOMES`, `TABLES`) in 43.8 s, every name a legal Cypher identifier and every relationship endpoint resolving.
 
-**Step 4: Entity and relationship extraction**
-Build `backend/app/storage/ner_extractor.py`. For each chunk, prompt the LLM to extract entities and relationships conforming to the generated ontology. Deduplicate across chunks by normalised name plus embedding similarity above a threshold — the same person mentioned in eight chunks must become one node, not eight. Merge attributes on collision.
+**Step 4: Entity and relationship extraction** ✅
+Build `backend/app/storage/ner_extractor.py`. For each chunk, prompt the LLM to extract entities and relationships conforming to the generated ontology. Deduplicate across chunks — the same person mentioned in eight chunks must become one node, not eight. Merge attributes on collision.
+
+**Deduplicate lexically. Embedding similarity does not work for this, and that was established by measurement.** Against `nomic-embed-text` on real entity names the two distributions overlap completely:
+
+| Pair | Cosine | Should merge? |
+|---|---|---|
+| `Mayor Alan Reyes` / `Alan Reyes` | 0.8394 | yes |
+| `Jane Doe` / `John Doe` | 0.8132 | **no** |
+| `Eastgate` / `Eastgate corridor` | 0.8560 | **no** |
+| `Alan Reyes` / `Reyes` | 0.7473 | yes |
+| `Riverbend Residents Association` / `Residents Association` | 0.7399 | yes |
+
+The highest should-*not*-merge pair scores above every genuine alias pair — a gap of **−0.12**. No threshold separates them. The spec's original "normalised name plus embedding similarity above a threshold" cannot be implemented as written.
+
+What does work, at no inference cost:
+
+- **Normalised name.** Strip honorifics, articles and suffixes, lowercase, drop punctuation. Measured 9 of 9 true merges with 0 false merges.
+- **Multi-token suffix alias.** One name being a contiguous suffix of another, within the same type: `opposition councillor tom whitfield` → `tom whitfield`, `Residents Association` → `Riverbend Residents Association`. A *suffix* specifically — a prefix rule fuses `Mill Street` into `Mill Street conservation area`. Two tokens minimum, so a bare surname does not swallow a full name.
+
+Keep an embedding pass at a high threshold (0.90) as a guarded safety net, but expect it to fire rarely. Merge only within an ontology type: a wrong merge is unrecoverable, so the bias is towards leaving duplicates.
+
+**The model names relationship endpoints it never returns as entities.** Measured on a real council document, 4 of 5 edges pointed at names absent from the entities list, and strict resolution discarded every one. Two things fix it, and both are needed:
+
+1. **Prompt.** Rendering endpoint constraints as `[Councillor -> PolicyDraft]` reads as a template to copy, and the model duly put the literal string `"PolicyDraft"` in the `target` field. State the constraint in prose and include a worked example showing that `source` and `target` are *names*, not types.
+2. **Materialise the endpoint.** When the relationship type declares exactly one permitted type for that position, create the missing node with that type and mark it `inferred`. Guard it: every token of the name must appear in the chunk the edge came from. That is the line between recovering "Draft Housing Density Policy 2026", which is in the text, and inventing an organisation called "Nobody".
+
+Attribute conflicts resolve to the **first occurrence in document order**, with losing values kept on the node as `attribute_conflicts` alongside their source chunk. Fan out over chunks with `asyncio.gather` so ordering is preserved — "first occurrence" must mean earliest chunk, not whichever request finished first. A chunk whose extraction fails costs that chunk, not the ingestion.
 
 **Step 5: Graph construction**
 Build `backend/app/services/graph_builder.py` persisting entities as nodes and relationships as edges in Neo4j, each carrying `graph_id`, source chunk references, and an embedding. Store provenance so any node can be traced back to the text that produced it.
