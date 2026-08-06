@@ -376,8 +376,22 @@ Share one `Neo4jStorage`, `LLMClient` and `EmbeddingService` process-wide. The d
 
 ### Phase 4: Agent profile generation
 
-**Step 1: Entity-to-persona mapping**
-Build `backend/app/services/profile_generator.py`. Select graph entities eligible to become agents (typically Person, plus optionally Organisation as institutional voices). For each, prompt the LLM to synthesise a persona: name, age, occupation, background bio, personality traits (a Big-Five-style vector or descriptive traits), interests, political/topical leanings, activity level, and a writing-style hint.
+**Step 1: Entity-to-persona mapping** ✅
+Build `backend/app/services/profile_generator.py`. Select graph entities eligible to become agents, and for each prompt the LLM to synthesise a persona: name, age, occupation, background bio, Big-Five personality scores plus descriptive traits, interests, political/topical leanings, activity level, and a writing-style hint.
+
+**Eligibility cannot be a hard-coded `Person` filter.** The ontology is generated per document, and real runs produce `Councillor`, `Mayor`, `PlanningOfficer`, `ResidentsAssociation` — never the literal type `Person`. Filtering on that name selects nobody, silently. Classify the ontology's types once per graph into individuals, institutions and neither, and keep `Person` always eligible as a fallback regardless of what the ontology proposed. Discard any type the model invents during classification, and degrade to the fallback rather than failing if classification does.
+
+**A population is not a cast of office-holders.** Documents name the people with titles, because that is who documents name. A crowd reacting to a housing policy is mostly not those people: it is mechanics, carpenters, care workers, shop staff, drivers, cleaners, students, carers and retirees. Maintain an occupation taxonomy spanning that whole spectrum, weighted so professionals are a minority.
+
+**Assign occupations; do not merely suggest them.** Measured: given eight suggested examples spread across sectors, `qwen2.5:14b` produced five carpenters and landscapers out of nine personas — it anchors on whatever concrete example it sees. Sampling occupations round-robin across sectors and telling the model to use the assigned one verbatim produced nine distinct occupations across nine sectors. Named entities are exempt: their occupation comes from the document, not the pool.
+
+**Normalise the sector from the occupation.** Left free, the model invents its own labels (`Construction`, `Community`), which cannot be clustered or plotted.
+
+**Personality is numeric and descriptive.** Five Big-Five floats in 0..1 give Step 5 something real to range-check and Phase 8 something to cluster; free-text traits give the agent prompt something concrete to act on.
+
+**Coerce field and type drift rather than re-prompting.** Models answer `age` as `34`, `"thirty-four"`, `"34 years old"` or `"mid-thirties"`; personality as 0..1, 0-100, 1-10 or `"high"`; and rename fields to `bio`, `job`, `big_five`, `political_leaning`. A repair round trip costs 30-90 s of local inference for something with an unambiguous reading. Above 1.0 the intended scale is ambiguous, so disambiguate on shape: `1 < n < 2` is an overshoot of 0..1 and clamps to 1.0, `2 <= n <= 10` is a 1-10 scale, `n > 10` is a percentage. Reject only what genuinely cannot be read.
+
+Persona generation runs at a **high temperature** (0.8), unlike the structuring stages: a population of near-identical personas is useless and the variation has to come from somewhere. Generate in parallel, and let one entity that will not yield a usable persona cost that entity rather than the population.
 
 **Step 2: Population expansion**
 A source document rarely names enough people to form a crowd. Implement synthetic expansion: from the graph's demographic and topical context, generate additional agents that are plausible members of the affected population but not named in the source. Make the named-to-synthetic ratio configurable and always mark provenance on each profile — a reader of the output must be able to distinguish a real named actor from a synthesised crowd member. This distinction is the difference between a defensible simulation and an accidental fabrication about a real person.
