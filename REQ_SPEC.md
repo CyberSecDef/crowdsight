@@ -339,8 +339,22 @@ Lexical ranks first, and every hit records `matched_by` so a ranking can be expl
 
 Depth cannot be parameterised in Cypher's `*1..n`, so it is interpolated from a clamped integer, with an audit marker.
 
-**Step 7: Graph API**
-Build `backend/app/api/graph.py`: `POST /api/graph/upload` (accept file, return `graph_id` and async `task_id`), `GET /api/graph/status/<task_id>`, `GET /api/graph/<graph_id>/entities` (filter by type, paginate), `GET /api/graph/<graph_id>/entities/<uuid>`, `GET /api/graph/<graph_id>/subgraph` (for visualisation), `DELETE /api/graph/<graph_id>`.
+**Step 7: Graph API** ✅
+Build `backend/app/api/graph.py`: `POST /api/graph/upload` (accept file, return `graph_id` and async `task_id`), `GET /api/graph/status/<task_id>`, `GET /api/graph/<graph_id>/entities` (filter by type, paginate), `GET /api/graph/<graph_id>/entities/<uuid>`, `GET /api/graph/<graph_id>/subgraph` (for visualisation), `DELETE /api/graph/<graph_id>`. Plus `GET /api/graph` (list), `GET /api/graph/<id>` (metadata), `GET /api/graph/<id>/entity-types`, `GET /api/graph/<id>/relationships`, `GET /api/graph/<id>/search`, `GET /api/graph/tasks`, and the ontology review pair below.
+
+**Task state belongs in SQLite, not a dict.** An in-memory registry loses every task when the API restarts, and a client polling afterwards gets a 404 indistinguishable from "no such task" — for a job that may have completed. On startup, reap tasks still marked `running`: nothing is executing them, and leaving them running means polling forever. Run jobs on one background event loop; the Ollama concurrency gate already bounds what actually executes, so a second loop adds contention without throughput.
+
+**Validate the upload inside the request, before creating a task.** A rejected file should be a `400` immediately, not a failed task the client has to poll to discover.
+
+**Ontology review is opt-in, not a separate flow.** `POST /upload` runs end to end as specified; `review_ontology=true` stops after the ontology and parks the task as `awaiting_review`, with `GET`/`POST /api/graph/<id>/ontology` to inspect, edit and resume. Both the one-shot path and Phase 9's review screen work, and neither forces the other. Operator edits go through the same validation as generated ones, so a hand-written `"Operator Added Type"` becomes `OperatorAddedType` rather than a label the graph could not store.
+
+**The two phases communicate through the filesystem, not memory.** Phase one writes `document.txt` and `ontology.json`; phase two reads them back and re-chunks. That is sound because chunking is deterministic — the same text and settings produce byte-identical chunks — so offsets survive a restart or a review that takes a week.
+
+**Errors must be typed.** Unknown `graph_id`, `task_id` or entity is `404`; a malformed or oversized upload is `400`; neither is `500`. A client cannot distinguish "you asked for something that does not exist" from "we broke" if both come back the same way.
+
+`GET /entities/<uuid>` includes provenance by default. An entity a caller cannot trace back to source text is precisely what this system exists not to produce, so it should not require a second request.
+
+Share one `Neo4jStorage`, `LLMClient` and `EmbeddingService` process-wide. The driver owns a connection pool and constructing one per request defeats it.
 
 **Step 8: Ingestion test units**
 **Tests:** `tests/test_file_parser.py` — PDF/MD/TXT fixtures parse correctly; oversized files and disallowed extensions are rejected; mis-encoded input is handled.
