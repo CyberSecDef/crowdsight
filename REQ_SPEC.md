@@ -393,8 +393,22 @@ Build `backend/app/services/profile_generator.py`. Select graph entities eligibl
 
 Persona generation runs at a **high temperature** (0.8), unlike the structuring stages: a population of near-identical personas is useless and the variation has to come from somewhere. Generate in parallel, and let one entity that will not yield a usable persona cost that entity rather than the population.
 
-**Step 2: Population expansion**
+**Step 2: Population expansion** ✅
 A source document rarely names enough people to form a crowd. Implement synthetic expansion: from the graph's demographic and topical context, generate additional agents that are plausible members of the affected population but not named in the source. Make the named-to-synthetic ratio configurable and always mark provenance on each profile — a reader of the output must be able to distinguish a real named actor from a synthesised crowd member. This distinction is the difference between a defensible simulation and an accidental fabrication about a real person.
+
+**Provenance alone is not enough; names must be collision-checked.** A post reading "Dawn Mercer said the policy was rushed" is indistinguishable from a real quotation, and if the document happens to name a Dawn Mercer it becomes a fabricated statement attributed to a real, identifiable person. Allocate synthetic names from a pool, rejecting any that *normalise* onto an entity the graph holds — the same normalisation that deduplicates entities in Phase 3, so `Cllr. Jane Doe` reserves `Jane Doe`. On pool exhaustion, number rather than reuse: two agents sharing a name breaks every downstream join.
+
+**The allocated name must be enforced, not suggested.** The generator overwrites whatever the model returns with the checked name, along with the assigned age and occupation. Setting the allocated name on the plan but not on the field the generator enforces leaves the model's own choice in place — a silent failure of the one property this step exists to provide, and one that only surfaces by asserting the model's name is *absent* from the output.
+
+State the negative in the prompt too: a synthetic persona is explicitly "NOT named in the source document" and "not a public figure, official or spokesperson". A model asked for "a resident" otherwise reaches for someone the document mentions.
+
+**What this cannot promise** is that an invented name matches nobody anywhere — every plausible name belongs to someone. It promises that no synthetic agent shares a name with anyone *this document names*, and that every consumer can tell which agents are invented.
+
+**Ground the crowd, but sample it locally.** One call sketches who the event actually affects — setting, affected groups, the stances in play and their weights, a plausible age range. Occupations, ages and stances are then sampled here against Step 1's taxonomy. Step 1 measured what happens when the model invents whole personas unaided: five carpenters out of nine. A failed sketch falls back to a generic crowd rather than failing the population.
+
+Ask the sketch for *ordinary* groups — renters, commuters, parents, small traders — not the job titles the document already uses. Include indifference among the stances; most people do not care much about most things, and a crowd where everyone is engaged is not a crowd.
+
+`POPULATION_NAMED_RATIO` (0.25) caps the share drawn from the document. If it names fewer people than the cap allows, all are used; if it names more, the excess is reported as dropped rather than silently discarded. A ratio of 0 still keeps one named actor rather than dropping the document's own actors entirely.
 
 **Step 3: OASIS profile schema conformance**
 Emit profiles in the JSON schema OASIS expects for agent initialisation, written to `data/simulations/<sim_id>/profiles/{twitter,reddit}.json`. Include the platform-specific fields each environment requires (follower counts, subreddit affiliations, initial post history).

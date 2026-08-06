@@ -328,6 +328,7 @@ docker compose exec backend python -m app.config
 | `NEO4J_CONNECTION_TIMEOUT` | `30` seconds |
 | `MAX_ROUNDS` | `10` |
 | `MAX_AGENTS` | `100` |
+| `POPULATION_NAMED_RATIO` | `0.25` |
 | `REPORT_TEMPERATURE` | `0.5` |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1500` / `150` characters |
 | `MAX_CONTENT_LENGTH` | 50 MB |

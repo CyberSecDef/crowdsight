@@ -192,6 +192,11 @@ class Config(BaseSettings):
     # --- Simulation limits ---------------------------------------------------
     MAX_ROUNDS: int = Field(default=10, ge=1)
     MAX_AGENTS: int = Field(default=100, ge=1)
+    # The share of the population drawn from people the document names. A crowd
+    # that is one-third councillors is not the crowd; documents name
+    # office-holders, and a simulation of office-holders answers a different
+    # question. If the document names fewer people than this allows, all are used.
+    POPULATION_NAMED_RATIO: float = Field(default=0.25, ge=0.0, le=1.0)
 
     # --- Report generation ---------------------------------------------------
     REPORT_TEMPERATURE: float = Field(default=0.5, ge=0.0, le=2.0)

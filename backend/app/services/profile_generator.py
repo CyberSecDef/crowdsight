@@ -475,8 +475,18 @@ class EntityContext:
     #: the same one or two, and a measured run produced five carpenters and
     #: landscapers out of nine. Assigning removes the choice.
     assigned_occupation: str | None = None
+    #: Set for synthetic crowd members. The allocated name is authoritative: it
+    #: has been checked against every name the document uses, and the generator
+    #: overwrites whatever the model returns with it.
+    assigned_name: str | None = None
+    assigned_age: int | None = None
+    assigned_stance: str | None = None
+    group: str | None = None
+    synthetic: bool = False
 
     def render(self) -> str:
+        if self.synthetic:
+            return self._render_synthetic()
         lines = [f"This person is named in the source document as: {self.name}",
                  f"The document classifies them as: {self.type}"]
         if self.assigned_occupation:
@@ -492,6 +502,36 @@ class EntityContext:
         if self.passages:
             excerpt = " ".join(" ".join(p.split()) for p in self.passages[:2])
             lines.append(f"Source passages mentioning them: {excerpt[:1200]}")
+        return "\n".join(lines)
+
+    def _render_synthetic(self) -> str:
+        """A crowd member: invented, ordinary, and not in the document.
+
+        The prompt says so explicitly. A model told to write "a resident"
+        without that instruction reaches for someone the document mentions,
+        which is the one thing a synthetic persona must not be.
+        """
+        lines = [
+            "Invent one ordinary member of the public affected by this event.",
+            "They are NOT named in the source document and are not a public "
+            "figure, official or spokesperson.",
+            f"Their name is exactly: {self.assigned_name or self.name}. Use it "
+            f"verbatim.",
+        ]
+        if self.assigned_occupation:
+            lines.append(
+                f"Their occupation is exactly: {self.assigned_occupation}. "
+                f"Use it verbatim; do not substitute a different job."
+            )
+        if self.assigned_age:
+            lines.append(f"They are {self.assigned_age} years old.")
+        if self.group:
+            lines.append(f"They belong to this part of the population: {self.group}.")
+        if self.assigned_stance:
+            lines.append(f"Their view of the event: {self.assigned_stance}.")
+        if self.passages:
+            excerpt = " ".join(" ".join(p.split()) for p in self.passages[:2])
+            lines.append(f"Context for the event: {excerpt[:1000]}")
         return "\n".join(lines)
 
 
@@ -586,9 +626,23 @@ class ProfileGenerator:
                 f"Could not generate a persona for {context.name!r}: {exc}"
             ) from exc
 
-        profile.provenance = "named"
-        profile.source_entity_uuid = context.uuid
-        profile.source_entity_type = context.type
+        if context.synthetic:
+            profile.provenance = "synthetic"
+            # The allocated name is the safety property, not a suggestion: it
+            # was checked against every name the document uses. Whatever the
+            # model returned is discarded.
+            if context.assigned_name:
+                profile.name = context.assigned_name
+            if context.assigned_age:
+                profile.age = context.assigned_age
+            profile.source_entity_uuid = None
+            profile.source_entity_type = None
+        else:
+            profile.provenance = "named"
+            profile.source_entity_uuid = context.uuid
+            profile.source_entity_type = context.type
+        if context.assigned_occupation:
+            profile.occupation = context.assigned_occupation
         # The model invents its own sector labels ("Construction", "Community"),
         # which are useless for clustering. Ours wins whenever the occupation
         # is one we know.
