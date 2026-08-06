@@ -338,7 +338,9 @@ docker compose exec backend python -m app.config
 | `LLM_BASE_URL` | `http://ollama:11434/v1` |
 | `LLM_MODEL_NAME` | `qwen2.5:14b` |
 | `LLM_API_KEY` | `ollama` (inert; the SDK just needs a non-empty string) |
-| `LLM_CONCURRENCY` | `4` (per process — Phase 6 divides it across simulation workers) |
+| `LLM_CONCURRENCY` | `4` (per process; divided across simulation workers) |
+| `MAX_CONCURRENT_SIMULATIONS` | `2` (the budget is divided by this at spawn) |
+| `API_LLM_RESERVE` | `1` (held back so the API still answers during a run) |
 | `LLM_TIMEOUT` / `LLM_CONNECT_TIMEOUT` | `300` / `10` seconds |
 | `LLM_MAX_ATTEMPTS` | `3` |
 | `LLM_RETRY_BASE_DELAY` / `LLM_RETRY_MAX_DELAY` | `1.0` / `30.0` seconds |
@@ -400,7 +402,7 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 851 tests: 792 unit (no services, ~8s) and 59 integration against live
+The suite is 881 tests: 822 unit (no services, ~14s) and 59 integration against live
 Neo4j and Ollama (~8 min), including a real document upload driven through to a built
 graph, a real scenario derivation checked against the config schema, and a three-agent
 two-round simulation driven end to end against local inference. `test_oasis_profile_contract.py` and `test_action_space.py` run in the default

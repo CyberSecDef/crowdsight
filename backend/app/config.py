@@ -196,6 +196,14 @@ class Config(BaseSettings):
     #: population. The spec's figure.
     SIMULATION_TEMPERATURE: float = Field(default=0.7, ge=0.0, le=2.0)
     MAX_AGENTS: int = Field(default=100, ge=1)
+    #: How many simulations may run at once. The LLM_CONCURRENCY budget is
+    #: divided by this at spawn time, so every worker's share is fixed and
+    #: predictable. Raising it makes each run slower, not the GPU busier.
+    MAX_CONCURRENT_SIMULATIONS: int = Field(default=2, ge=1)
+    #: Requests held back from the workers so the API can still serve
+    #: interviews, graph queries and report generation while a run is in
+    #: flight. Without it a saturated GPU makes the UI look dead.
+    API_LLM_RESERVE: int = Field(default=1, ge=0)
     # The share of the population drawn from people the document names. A crowd
     # that is one-third councillors is not the crowd; documents name
     # office-holders, and a simulation of office-holders answers a different

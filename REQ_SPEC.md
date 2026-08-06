@@ -578,6 +578,32 @@ Run each simulation in a separate OS process, not a thread. Runs are long, memor
 
 **`simulation_manager` must divide the `LLM_CONCURRENCY` budget across the workers it spawns**, passing each its share via the environment. Phase 2's gate is per process, so without this three concurrent runs at 4 each put 12 requests in flight against one Ollama — precisely the GPU OOM the bound exists to prevent. The arithmetic is deliberately explicit rather than hidden behind a cross-process semaphore, whose blocking `acquire` would park one thread per waiting coroutine, hundreds of them during a 300-agent round. Reserve a share for the API process too, which still serves interviews while a run is in flight.
 
+✅ Implemented across `simulation_ipc.py`, `simulation_worker.py` and `simulation_manager.py`. Verified against real processes: 43/43 checks, plus a real two-agent simulation driven to completion inside a genuinely spawned worker and supervised over its socket (14/14).
+
+**The budget arithmetic**, with two new knobs, `MAX_CONCURRENT_SIMULATIONS` (default 2) and `API_LLM_RESERVE` (default 1):
+
+    share = (LLM_CONCURRENCY - API_LLM_RESERVE) // MAX_CONCURRENT_SIMULATIONS
+
+Divided by the *maximum* number of concurrent runs rather than the current number, so a worker's share never changes underneath it. Rebalancing live workers over IPC would use idle capacity but introduces a failure mode where a lost message oversubscribes the card. The spec's own example is now impossible: three runs on a budget of 4 reach 4 requests in flight, not 12. The share is passed through the environment at spawn, so a worker never guesses.
+
+**`spawn`, never `fork`.** The default start method on Linux is `fork`, which would copy the API's asyncio loop thread, its Neo4j connection pool and its SQLite handles into a child where the loop's thread does not exist. Results range from a duplicated socket to a corrupt write.
+
+**Unix socket rather than a queue**, because `multiprocessing.Queue` dies with the parent: an API restart would leave a multi-hour GPU-bound run permanently unreachable but still running. A socket file outlives the parent, so a manager coming back up can knock. The protocol is one JSON object per line — drivable from `socat` when something has gone wrong at 3 a.m., which a pickle stream is not. The server is asyncio (it shares the worker's loop); the client is blocking with a timeout (it is called from Flask handlers with no loop). That asymmetry means the client must never be called from the server's own loop, which is documented and only arises in tests.
+
+**Three defects found by running it, not reading it:**
+
+*Zombies read as alive.* A child that has exited keeps its `/proc` entry until reaped, so `alive()` returned true, a graceful stop waited out its entire timeout, and a run that had finished cleanly was then SIGKILLed and marked failed. `/proc/<pid>/stat` field 3 is now checked and `Z`/`X` count as dead; the manager also polls its own children so they do not linger.
+
+*A vanished worker was marked complete.* Reconciliation defaulted to success, so a killed process looked like a finished run. The worker now records its own outcome — it is the only party that knows — and anything found still `running` with no process is marked failed, which is what Step 3's resume needs.
+
+*The socket path limit was set too low.* 100 characters, where Linux allows 107 (`sun_path` is 108 including the NUL). Corrected, with the check kept because the simulation root is configurable and a deep directory otherwise fails at `bind()` with an error about the address rather than the length.
+
+**PID reuse is treated as real.** A recorded PID is not proof of identity and reaping means killing processes, so every record stores the process start time; PID plus start time is unique for the life of a boot. A recycled PID is never mistaken for ours.
+
+**Orphans are adopted when they answer.** After an API restart the manager pings each run recorded as running: a healthy worker is adopted and supervision resumes; one that is alive but unreachable is escalated through SIGTERM to SIGKILL and marked failed; one that is simply gone is marked failed. Drafts and finished runs are left alone.
+
+**Tests:** `tests/test_process_isolation.py` (named in the spec under Step 6), 30 tests, all against real spawned processes.
+
 **Step 3: Round loop and persistence**
 Drive the OASIS environment round by round. After each round, persist agent actions, posts, and comments to the run's SQLite database, and write a checkpoint enabling resume. Emit structured progress: current round, total rounds, per-action counts, agents active.
 
