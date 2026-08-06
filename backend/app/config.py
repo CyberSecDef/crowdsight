@@ -191,6 +191,10 @@ class Config(BaseSettings):
 
     # --- Simulation limits ---------------------------------------------------
     MAX_ROUNDS: int = Field(default=10, ge=1)
+    #: Sampling temperature for simulation agents. Higher than the extraction
+    #: paths on purpose: a population that all reasons identically is not a
+    #: population. The spec's figure.
+    SIMULATION_TEMPERATURE: float = Field(default=0.7, ge=0.0, le=2.0)
     MAX_AGENTS: int = Field(default=100, ge=1)
     # The share of the population drawn from people the document names. A crowd
     # that is one-third councillors is not the crowd; documents name

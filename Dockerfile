@@ -43,6 +43,26 @@ RUN mkdir -p "${TIKTOKEN_CACHE_DIR}" \
     && python -c "import tiktoken; [tiktoken.get_encoding(n) for n in ('o200k_base', 'cl100k_base', 'p50k_base', 'r50k_base')]" \
     && chmod -R a+rX "${TIKTOKEN_CACHE_DIR}"
 
+# The same problem again, and the reason the Twitter recommender needs it:
+# OASIS's Twitter platform hardcodes `recsys_type="twhin-bert"` and pulls
+# Twitter/twhin-bert-base from HuggingFace the first time it builds a feed.
+# Sealed, that fails and every agent gets a degraded feed — a silently worse
+# simulation rather than an error. Reddit uses no model and is unaffected.
+# Baked here, where the network still exists. Loaded exactly as
+# `oasis/social_platform/recsys.py` loads it, so the cache keys match.
+ENV HF_HOME=/opt/huggingface
+RUN mkdir -p "${HF_HOME}" \
+    && python -c "from transformers import AutoModel, AutoTokenizer; \
+AutoTokenizer.from_pretrained(pretrained_model_name_or_path='Twitter/twhin-bert-base', model_max_length=512); \
+AutoModel.from_pretrained(pretrained_model_name_or_path='Twitter/twhin-bert-base')" \
+    && chmod -R a+rX "${HF_HOME}"
+
+# Now that the cache is populated, refuse to reach for the network at all.
+# Without this a cache miss spends ~90 seconds on retries against a DNS that
+# cannot resolve, per model, before failing anyway.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 COPY backend/ /app/
 
 # Match the host UID so the bind-mounted ./data stays writable. Override at

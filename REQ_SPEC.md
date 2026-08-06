@@ -553,6 +553,26 @@ model = ModelFactory.create(
 
 This is the single most important integration point in the project: it is what keeps every one of the thousands of agent turns on local hardware. Verify it before building anything on top — a smoke test of three agents for two rounds, confirming via Ollama's logs that requests arrive locally.
 
+✅ Implemented in `backend/app/services/simulation_runner.py`. The smoke test passes: three agents, two rounds, real local inference, 30/30 checks.
+
+**The binding is guarded, not merely written correctly.** `build_model()` has no `model_platform` parameter, so "no code path can construct a cloud model" is a property of the signature rather than a convention someone must remember. It also re-checks the URL through the same `classify_host` the configuration uses — defence in depth, since a caller could hold a `Config` mutated after validation. An empty URL is refused explicitly: with `url` unset, camel's `OllamaModel` falls back to `OLLAMA_BASE_URL` and then calls `_start_server()`, shelling out to an `ollama` binary this image does not contain.
+
+**Four defects found by reading the installed camel-oasis 0.2.5 and running it.**
+
+*`env.step()` gathers agent turns with no `return_exceptions`.* One agent raising — a timeout, a malformed tool call — propagates out and aborts the round, taking every other agent's turn with it and killing a run that may be hours old. `harden_agent()` wraps each agent's LLM turn per instance so a failure is logged, counted and treated as having done nothing. Verified: with one agent forced to raise, the round completed and the other two acted. `BaseException` still propagates, so a stop request is never swallowed. Manual actions are left unwrapped deliberately — a seed post that cannot be published is a broken run, not a lost turn.
+
+*`get_db_path()` falls back to a database inside the installed package.* With `OASIS_DB_PATH` unset it returns `<site-packages>/oasis/data/social_media.db` — and `agent_environment.py:71` calls it on **every agent turn** to build that agent's feed. So agents read from a shared package-internal file rather than the run they are in, regardless of the `database_path` passed to `oasis.make()`. Unwritable as a non-root user, which is how it surfaced; silently wrong if it ever were writable. The runner now sets `OASIS_DB_PATH` to the run's own database.
+
+*`OasisEnv` defaults `semaphore=128`.* That is OASIS's own concurrency limiter, and 128 simultaneous completions against one 12 GB GPU is exactly the exhaustion Phase 2's gate exists to prevent. Bound to `LLM_CONCURRENCY`; Step 2 divides that budget across worker processes.
+
+*`generate_twitter_agent_graph` never sets `user_name`.* It builds `UserInfo(name=..., description=...)`, so `generate_custom_agents` signs every population agent up as NULL and the run database cannot say who posted what — while our broadcaster, constructed by hand, had one. The runner backfills usernames from our own profile record before `reset()`, which is where signup happens.
+
+**A second sealed-network blocker, found and fixed like tiktoken.** OASIS's Twitter platform hardcodes `recsys_type="twhin-bert"` and pulls `Twitter/twhin-bert-base` from HuggingFace the first time it builds a feed. Sealed, that fails after ~90 s of DNS retries and leaves every agent with a degraded feed — a silently worse simulation rather than an error. Reddit uses no recommender model and was unaffected. The model is now baked into `HF_HOME=/opt/huggingface` at build time, and `HF_HUB_OFFLINE=1` stops any further network attempt from wasting 90 s before failing anyway. Seal re-verified after the rebuild: internal network, no default route, `huggingface.co`, `api.openai.com` and the tiktoken host all refused.
+
+**The broadcaster is added to the agent graph separately and flagged**, not written into the profile files. Written in among the personas it would be indistinguishable from one downstream and would land in Phase 7's sentiment and influence statistics as though it were a member of the public. It still signs up, posts and can be followed like a real news account. `SIMULATION_TEMPERATURE` (default 0.7, the spec's figure) is now a config knob.
+
+**Tests:** `tests/test_ollama_model_binding.py` (named in Step 6, written here because Step 1 says to verify before building on top) and `tests/test_simulation_runner.py`, including the `integration`-marked three-agent two-round smoke test.
+
 **Step 2: Process isolation and IPC**
 Run each simulation in a separate OS process, not a thread. Runs are long, memory-heavy, and must be independently killable without taking down the API. Build `simulation_ipc.py` for control-plane messaging (status, stop, interview requests) over a queue or Unix socket, and `simulation_manager.py` to track PIDs, lifecycle state, and cleanup of orphaned processes on restart.
 

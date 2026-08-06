@@ -43,12 +43,20 @@ The only step requiring internet access is one-time provisioning (pulling model 
 and packages), after which the stack runs sealed.
 
 Provisioning includes assets that are easy to miss because they are fetched lazily at
-*runtime* by a dependency rather than installed by pip. camel resolves a tiktoken BPE
-encoding the moment a `ChatAgent` is constructed, and tiktoken downloads it on first
-use — inside the seal that is a DNS failure, and agent construction dies before any
-model is contacted. The image therefore bakes the encodings into
-`TIKTOKEN_CACHE_DIR=/opt/tiktoken` at build time. If you rebuild without a network,
-copy that directory forward.
+*runtime* by a dependency rather than installed by pip. Two of these exist, and both are
+baked into the image at build time:
+
+- **tiktoken BPE encodings** (`TIKTOKEN_CACHE_DIR=/opt/tiktoken`). camel resolves one the
+  moment a `ChatAgent` is constructed. Sealed, that is a DNS failure and agent
+  construction dies before any model is contacted.
+- **`Twitter/twhin-bert-base`** (`HF_HOME=/opt/huggingface`). OASIS's Twitter platform
+  hardcodes `recsys_type="twhin-bert"` and pulls it the first time it builds a feed.
+  Sealed, the recommender fails and every agent gets a degraded feed — a silently worse
+  simulation rather than an error. Reddit uses no recommender model and is unaffected.
+
+`HF_HUB_OFFLINE=1` is set so a cache miss fails immediately rather than spending ~90
+seconds retrying against a DNS that cannot resolve. If you rebuild without a network,
+copy both directories forward.
 
 ### Designated endpoints — the complete allowlist
 
@@ -392,9 +400,10 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 743 tests: 685 unit (no services, ~7s) and 58 integration against live
-Neo4j and Ollama (~7.5 min), including a real document upload driven through to a built
-graph and a real scenario derivation checked against the config schema. `test_oasis_profile_contract.py` and `test_action_space.py` run in the default
+The suite is 851 tests: 792 unit (no services, ~8s) and 59 integration against live
+Neo4j and Ollama (~8 min), including a real document upload driven through to a built
+graph, a real scenario derivation checked against the config schema, and a three-agent
+two-round simulation driven end to end against local inference. `test_oasis_profile_contract.py` and `test_action_space.py` run in the default
 suite despite costing ~4s to import OASIS: they are the checks that a simulation will
 actually load its agents and that those agents will actually be able to act, and they
 are worth always running.
