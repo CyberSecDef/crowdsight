@@ -255,8 +255,18 @@ Split extracted text into overlapping chunks. Prefer semantic boundaries — spl
 
 **Related: the PDF parser must join blocks with a blank line**, not a single newline. Blocks are broadly paragraphs, and joining them with `\n` makes a whole page look like one paragraph, pushing chunking straight to its sentence fallback.
 
-**Step 3: Ontology generation**
+**Step 3: Ontology generation** ✅
 Build `backend/app/services/ontology_generator.py`. Given a document sample, ask the LLM to propose a domain-appropriate ontology: entity types (e.g. Person, Organisation, Policy, Location, Product, Event) and relationship types, each with a description and expected attributes. This adapts the graph to the document's domain instead of forcing a fixed schema. Return validated JSON; allow the operator to review and override before extraction proceeds.
+
+**Type names become Neo4j labels, and the model will not produce legal ones.** Asked for entity types it answers "Public Figure" or "Local Government Body", neither of which passes `escape_identifier`. Normalise to PascalCase (`PublicFigure`) for the identifier and keep the original as a human-readable `label`, so operators and the extraction prompt see readable text while the graph gets valid identifiers. Relationship names become `UPPER_SNAKE_CASE`, attributes `snake_case`. Reject only names that normalise to nothing. Re-prompting instead would spend 30–90 s of local inference on a fix a two-line transform handles, and small models tend to re-offend.
+
+**Drop relationships whose endpoints are not in the ontology.** A relationship referencing an unknown type cannot be extracted, and leaving it produces edges the graph schema has no place for — a failure that surfaces during ingestion rather than at review time. Deduplicate types by normalised name for the same reason.
+
+**Sample the document, not its first page.** Policy drafts open with a title page and boilerplate, so an ontology from the opening describes the cover. Take chunks from the beginning, middle and end, mark the elisions explicitly (`[...]`) so the model does not read distant passages as consecutive, and use the whole document when it fits. Enforce the budget honestly: a section must not take a whole chunk larger than its share, or a 3000-character budget quietly returns 4400 characters — trim at a sentence boundary instead.
+
+Temperature should be low (0.2). This is a structuring task, and creativity shows up as invented types the document never mentions.
+
+Verified against the real `qwen2.5:14b` on GPU: a 1247-character council housing draft produced 5 entity types (`Councillor`, `Organisation`, `PolicyDocument`, `Person`, `AmendmentProposal`) and 7 relationship types (`CHAIR_OF`, `WORKS_FOR`, `PUBLISHES`, `OPPOSES`, `DEFENDS`, `WELCOMES`, `TABLES`) in 43.8 s, every name a legal Cypher identifier and every relationship endpoint resolving.
 
 **Step 4: Entity and relationship extraction**
 Build `backend/app/storage/ner_extractor.py`. For each chunk, prompt the LLM to extract entities and relationships conforming to the generated ontology. Deduplicate across chunks by normalised name plus embedding similarity above a threshold — the same person mentioned in eight chunks must become one node, not eight. Merge attributes on collision.
