@@ -129,7 +129,12 @@ runs.
 Key Python packages: `flask>=3.0`, `flask-cors>=6.0`, `openai>=1.0` (SDK only, pointed at
 Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0`,
 `pydantic-settings>=2.2`, `jsonschema>=4.0`, `PyMuPDF>=1.24`, `python-dotenv>=1.0`,
-`httpx>=0.27`, `charset-normalizer`, `chardet`. Full list in `backend/requirements.txt`.
+`httpx>=0.27`, `mcp>=1.9,<2`, `charset-normalizer`, `chardet`. Full list in
+`backend/requirements.txt`.
+
+> `mcp` is pinned below 2.0 deliberately: `camel-ai` imports `FastMCP` from
+> `mcp.server`, which 2.0 removed, and an unpinned install makes `import oasis`
+> fail outright.
 
 ---
 

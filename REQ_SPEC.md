@@ -410,8 +410,26 @@ Ask the sketch for *ordinary* groups — renters, commuters, parents, small trad
 
 `POPULATION_NAMED_RATIO` (0.25) caps the share drawn from the document. If it names fewer people than the cap allows, all are used; if it names more, the excess is reported as dropped rather than silently discarded. A ratio of 0 still keeps one named actor rather than dropping the document's own actors entirely.
 
-**Step 3: OASIS profile schema conformance**
-Emit profiles in the JSON schema OASIS expects for agent initialisation, written to `data/simulations/<sim_id>/profiles/{twitter,reddit}.json`. Include the platform-specific fields each environment requires (follower counts, subreddit affiliations, initial post history).
+**Step 3: OASIS profile schema conformance** ✅
+Emit profiles in the exact shapes OASIS reads, written to `data/simulations/<sim_id>/profiles/`.
+
+**The two formats are not both JSON.** Read from `camel-oasis` 0.2.5 rather than assumed:
+
+| Platform | Loader | Format | Fields indexed directly |
+|---|---|---|---|
+| Twitter | `generate_twitter_agent_graph` | **CSV** via `pd.read_csv` | `username`, `description`, `user_char` |
+| Twitter | `generate_agents` | CSV | the above plus `name`, `following_agentid_list`, `following_count`, `followers_count` |
+| Reddit | `generate_reddit_agent_graph` | JSON list | `username`, `bio`, `persona`, `mbti`, `gender`, `age`, `country` |
+
+So emit `twitter.csv` and `reddit.json`. Writing `twitter.json` raises inside `pd.read_csv`, and a missing Reddit key is a `KeyError` several frames deep — exactly the opaque, hours-in failure this step exists to prevent. Derive these shapes by reading the loaders; do not write them from memory.
+
+Write `profiles.json` alongside. The OASIS files are lossy — no Big Five, no provenance, no link back to the graph entity — and Phase 8's report and the Phase 9 UI need all three. Nothing in OASIS reads it.
+
+**OASIS requires three fields the persona schema does not have.** `gender`, `country` and `mbti` are interpolated into the Reddit agent's *own* system prompt (`"You are a {gender}, {age} years old ... from {country}"`). Derive MBTI from the Big Five by a documented projection, so the type shown to the agent cannot contradict the personality the rest of the system uses. Invent gender and country for synthetic agents — they are invented people — but leave them unstated for real named people unless the source says otherwise: attributing a gender to an identifiable person the document did not describe is not ours to do. Phrase the placeholder to read correctly inside that sentence; `"You are a unspecified"` goes straight into an agent's prompt.
+
+Validate what was written before returning, mirroring the loaders' actual accesses. `age` must be an `int`; `username`, `description` and `user_char` must be non-empty, since each becomes part of an agent's system prompt.
+
+**Dependency blocker found here.** `camel-ai` 0.2.78 does `from mcp.server import FastMCP`. `mcp` 2.0 removed that export, so an unpinned install makes `import oasis` fail outright with an `ImportError` — the simulation engine cannot be loaded at all, and Phase 6 is dead on arrival. Pin `mcp>=1.9,<2`.
 
 **Step 4: Parallel generation with progress**
 Profile generation is the second-most expensive stage. Run it as a bounded parallel job (respecting the global Ollama semaphore) with per-profile progress reporting, partial-result persistence, and resumability after interruption.

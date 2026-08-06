@@ -256,6 +256,13 @@ class PersonaProfile(BaseModel):
     leanings: str = Field(default="", description="Political or topical disposition")
     activity_level: ActivityLevel = "moderate"
     writing_style: str = ""
+    # OASIS interpolates these into the Reddit agent's own system prompt, so
+    # they must exist. Invented freely for synthetic agents; left unstated for
+    # real named people unless the document itself says otherwise, because
+    # attributing a gender to an identifiable person the source did not
+    # describe is not ours to do.
+    gender: str = ""
+    country: str = ""
 
     # Set by the generator, not the model.
     provenance: Literal["named", "synthetic"] = "synthetic"
@@ -335,7 +342,8 @@ class PersonaProfile(BaseModel):
             raise ValueError("must not be empty")
         return text
 
-    @field_validator("leanings", "writing_style", "background", "sector", mode="before")
+    @field_validator("leanings", "writing_style", "background", "sector",
+                     "gender", "country", mode="before")
     @classmethod
     def _stringify(cls, value: Any) -> Any:
         if value is None:
@@ -457,7 +465,8 @@ otherwise. Examples across the spectrum: {examples}.
 
 Return JSON with: name, age, occupation, sector, background, personality \
 (openness, conscientiousness, extraversion, agreeableness, neuroticism), \
-traits, interests, leanings, activity_level, writing_style."""
+traits, interests, leanings, activity_level, writing_style, and — for invented \
+people only — gender and country."""
 
 
 @dataclass
@@ -483,6 +492,8 @@ class EntityContext:
     assigned_stance: str | None = None
     group: str | None = None
     synthetic: bool = False
+    #: True only when the source document itself states the person's gender.
+    gender_stated: bool = False
 
     def render(self) -> str:
         if self.synthetic:
@@ -529,6 +540,11 @@ class EntityContext:
             lines.append(f"They belong to this part of the population: {self.group}.")
         if self.assigned_stance:
             lines.append(f"Their view of the event: {self.assigned_stance}.")
+        lines.append(
+            "Also give them a gender and a country, consistent with the "
+            "setting. They are invented, so nothing is being attributed to a "
+            "real person."
+        )
         if self.passages:
             excerpt = " ".join(" ".join(p.split()) for p in self.passages[:2])
             lines.append(f"Context for the event: {excerpt[:1000]}")
@@ -641,6 +657,10 @@ class ProfileGenerator:
             profile.provenance = "named"
             profile.source_entity_uuid = context.uuid
             profile.source_entity_type = context.type
+            # The model will volunteer a gender for a real named person. The
+            # document did not say, so neither do we.
+            if not context.gender_stated:
+                profile.gender = ""
         if context.assigned_occupation:
             profile.occupation = context.assigned_occupation
         # The model invents its own sector labels ("Construction", "Community"),
