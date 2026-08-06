@@ -297,8 +297,29 @@ Keep an embedding pass at a high threshold (0.90) as a guarded safety net, but e
 
 Attribute conflicts resolve to the **first occurrence in document order**, with losing values kept on the node as `attribute_conflicts` alongside their source chunk. Fan out over chunks with `asyncio.gather` so ordering is preserved — "first occurrence" must mean earliest chunk, not whichever request finished first. A chunk whose extraction fails costs that chunk, not the ingestion.
 
-**Step 5: Graph construction**
+**Step 5: Graph construction** ✅
 Build `backend/app/services/graph_builder.py` persisting entities as nodes and relationships as edges in Neo4j, each carrying `graph_id`, source chunk references, and an embedding. Store provenance so any node can be traced back to the text that produced it.
+
+The shape:
+
+```
+(:Entity)-[:MENTIONED_IN {surface}]->(:Chunk)-[:PART_OF]->(:Document)
+(:Entity)-[:<ONTOLOGY_TYPE>]->(:Entity)
+```
+
+**Provenance is a traversal, not an array property.** Phase 8 requires every claim in a report to cite specific source text; making that a graph query means a citation is checkable by the same mechanism that produced it, and "which entities co-occur in a passage" becomes a query rather than a scan.
+
+**Chunk nodes store offsets, not text.** Chunks are exact slices of the normalised document (Step 2 guarantees `text == source[start:end]`), so offsets recover the text exactly. Write the document once to `data/graphs/<graph_id>/document.txt` alongside `ontology.json`. Storing chunk text in Neo4j would put the whole document into the graph store and its page cache — and because chunks overlap, rather more than the whole document.
+
+**Rebuilding must be idempotent, which means identifiers must be derived rather than random.** An entity's UUID is a UUID5 of `graph_id | type | normalised name`; a chunk's is `graph_id | chunk | index`; an edge's is `graph_id | type | source | target`. The extractor's UUIDs are transient and remapped here. `MERGE` on a derived UUID then finds the existing node instead of creating a second one. Use a fixed namespace constant — changing it orphans every previously built graph.
+
+Give each entity its ontology type as a **second label** so a Phase 9 visualisation can match `(:Person)` directly. That and the relationship type are the only places Cypher genuinely cannot parameterise, and both go through `escape_identifier`, which validates rather than escapes. Everything else — including the dynamic attribute map, via `SET e += $props` — stays parameterised.
+
+Store extracted attributes under an `attr_` prefix so an attribute called `name` or `type` cannot shadow a structural property. Keep `attribute_conflicts` as JSON: it is for human review, not for querying.
+
+Offer `replace=True` to drop the graph first, for when re-extraction should remove entities that are no longer found. Plain rebuild merges.
+
+Extend the schema (Phase 2 Step 4) with uniqueness constraints on `Chunk.uuid` and `Document.graph_id` and an index on `Chunk.graph_id`. Idempotency depends on those constraints existing.
 
 **Step 6: Graph query and search**
 Build `backend/app/storage/search_service.py` and `graph_storage.py` supporting: fetch entities by graph, by type, by UUID; semantic search by embedding similarity; and neighbourhood traversal to depth N.

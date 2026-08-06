@@ -76,7 +76,7 @@ async def test_schema_creation_is_idempotent(storage):
     first = await schema.apply_schema(storage)
     second = await schema.apply_schema(storage)
     assert first.summary() == second.summary()
-    assert len(first.constraints) == 1
+    assert len(first.constraints) == len(schema.CONSTRAINTS)
     assert len(first.indexes) == len(schema.INDEXES)
 
 

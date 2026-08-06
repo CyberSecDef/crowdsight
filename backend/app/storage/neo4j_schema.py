@@ -49,6 +49,19 @@ CONSTRAINTS: tuple[tuple[str, str], ...] = (
         "CREATE CONSTRAINT entity_uuid_unique IF NOT EXISTS "
         "FOR (e:Entity) REQUIRE e.uuid IS UNIQUE",
     ),
+    # Provenance nodes. Their uniqueness is what makes rebuilding a document
+    # idempotent rather than additive: MERGE on a deterministic uuid finds the
+    # existing node instead of creating a second one.
+    (
+        "chunk_uuid_unique",
+        "CREATE CONSTRAINT chunk_uuid_unique IF NOT EXISTS "
+        "FOR (c:Chunk) REQUIRE c.uuid IS UNIQUE",
+    ),
+    (
+        "document_graph_id_unique",
+        "CREATE CONSTRAINT document_graph_id_unique IF NOT EXISTS "
+        "FOR (d:Document) REQUIRE d.graph_id IS UNIQUE",
+    ),
 )
 
 INDEXES: tuple[tuple[str, str], ...] = (
@@ -65,6 +78,11 @@ INDEXES: tuple[tuple[str, str], ...] = (
         "entity_graph_type",
         "CREATE INDEX entity_graph_type IF NOT EXISTS "
         "FOR (e:Entity) ON (e.graph_id, e.type)",
+    ),
+    # Deleting a graph scans by graph_id across all three node kinds.
+    (
+        "chunk_graph_id",
+        "CREATE INDEX chunk_graph_id IF NOT EXISTS FOR (c:Chunk) ON (c.graph_id)",
     ),
 )
 
