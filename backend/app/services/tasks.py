@@ -263,9 +263,12 @@ class TaskProgress:
         if fields:
             self.store.update(self.task_id, **fields)
 
-    def await_review(self, result: dict[str, Any], message: str) -> None:
+    def await_review(
+        self, result: dict[str, Any], message: str, *,
+        stage: str = "ontology_review",
+    ) -> None:
         """Park the task: its work is done and a human must act next."""
         self.store.update(
-            self.task_id, status=TaskStatus.AWAITING_REVIEW, stage="ontology_review",
+            self.task_id, status=TaskStatus.AWAITING_REVIEW, stage=stage,
             progress=0.5, message=message, result=result,
         )

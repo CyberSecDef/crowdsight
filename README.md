@@ -229,7 +229,15 @@ if any of them succeeds.
    personas — check that named agents match the source and synthetic ones are plausible.
    Edit or drop any that look wrong; errors here propagate through the whole run.
 3. **Review the scenario config.** Check the event description, seed posts, round count,
-   and any scheduled mid-run events. This is the cheapest point to improve output quality.
+   and any scheduled mid-run events (generated ones are counterfactual and start disabled;
+   enabling one is a review decision). This is the cheapest point to improve output quality.
+   The config lives at `data/simulations/<sim_id>/config.json` and is editable over
+   `PUT /api/simulations/<sim_id>/config` until the run starts. Edits are re-verified
+   against the source exactly as generated output is — a quote that is not in the document
+   is reassigned to the broadcaster and the correction reported back, so review can improve
+   a scenario but cannot attribute an invented statement to a real person. Editing a
+   simulation that has already started forks it into a new one rather than rewriting the
+   config a run is executing from.
 4. **Start the run.** Pick platform and rounds, then watch the live feed. **Begin with 3–5
    agents and 2 rounds to validate the pipeline before committing to a long run.**
 5. **Interview agents** mid-run or after — why they posted something, what they think of
@@ -384,7 +392,7 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 663 tests: 607 unit (no services, ~7s) and 56 integration against live
+The suite is 732 tests: 676 unit (no services, ~7s) and 56 integration against live
 Neo4j and Ollama (~85s), including a real document upload driven through to a built
 graph. `test_oasis_profile_contract.py` and `test_action_space.py` run in the default
 suite despite costing ~4s to import OASIS: they are the checks that a simulation will

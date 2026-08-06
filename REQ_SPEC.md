@@ -499,8 +499,22 @@ Implemented in `backend/app/services/action_space.py`. Both lists above were che
 
 **Sealed-network defect found and fixed here.** Constructing any camel `ChatAgent` resolves a tiktoken BPE encoding, which tiktoken downloads from `openaipublic.blob.core.windows.net` on first use. Inside the sealed network that fails with a DNS error, so *agent construction itself* was impossible — a Phase 6 blocker unrelated to the model backend. The `Dockerfile` now bakes `o200k_base`, `cl100k_base`, `p50k_base` and `r50k_base` into `TIKTOKEN_CACHE_DIR=/opt/tiktoken` at build time, when the network is still available.
 
-**Step 3: Config persistence and override**
+**Step 3: Config persistence and override** ✅
 Write the generated config to `data/simulations/<sim_id>/config.json` and expose it for operator review and editing before the run starts. Generated scenarios are frequently *almost* right; a human edit pass materially improves output quality.
+
+Implemented in `backend/app/services/simulation_store.py` and `backend/app/api/simulation.py`, shaped after the ontology approval flow already in `api/graph.py`: a proposal is generated, written to disk, and parked for a human. Four decisions carry the weight.
+
+**An operator edit is re-verified exactly like generated output.** Review is the obvious way to bypass the attribution guarantee Step 1 exists to enforce — an operator can attribute an invented sentence to a real named person more easily than the model can, because they can also type in `source_start` and `source_end` by hand and make a fabrication look evidenced. So `verify_scenario()` was lifted out of the generator to module level and both paths call it: offsets are recomputed rather than believed, an unlocatable quote is demoted to the broadcaster, and every correction is returned in `changes` so nothing is altered silently. Verified against real generation — a fabricated quote carrying hand-written offsets was demoted, with the reason reported.
+
+**A quote cannot buy acceptance by withholding its evidence.** An edit containing `named_quote` posts is refused outright when the source document is unavailable, rather than accepted unverified. Otherwise the check is optional: omit the document, skip the check.
+
+**A started run's config is frozen, and editing it forks.** Editing the file a run is executing from would leave the report describing conditions that never held. `SimulationState.LOCKED` covers running, complete and failed; an edit to a locked simulation is written to a new `sim_id` that records `forked_from`, leaving the original untouched. The fork is re-verified too — forking is not a way around the check either. An edit also cannot repoint a scenario at a different `graph_id`, which would verify its quotes against a document the simulation is not about.
+
+**Run state lives outside the file the operator edits.** `config.json` holds the scenario and nothing else; `meta.json` holds lifecycle (state, timestamps, `forked_from`, edit count, last corrections). An operator editing the scenario cannot corrupt run state, and a diff of two configs shows only what a human changed. Both are written atomically via a temporary file and rename, because the UI polls these files while they are being saved. A config whose `meta.json` is missing is rebuilt rather than 404'd — the scenario is the valuable half.
+
+`sim_id` is `sim-YYYYmmdd-HHMMSS-xxxxxx`: it sorts chronologically in a directory listing, which is how an operator actually finds a run, and the random tail keeps two simulations created in the same second apart. Because it is not derived from the graph, one graph can hold several variant scenarios instead of each regeneration overwriting the last. `SIM_ID_PATTERN` doubles as the path-traversal guard, since `sim_id` arrives from a URL path segment.
+
+HTTP surface: `POST /api/simulations` (derive, returns a task to poll), `GET /api/simulations` (list, filterable by graph), `GET /api/simulations/<sim_id>` (metadata, config and an `editable` flag), `GET|PUT /api/simulations/<sim_id>/config`. A forked edit answers `201` rather than `200`, since it created a different resource than the one addressed. `TaskProgress.await_review` gained a `stage` parameter so scenario review is distinguishable from ontology review.
 
 **Step 4: Config test units**
 **Tests:** `tests/test_simulation_config.py` — generated config validates against the schema; round count respects `MAX_ROUNDS`; scheduled event rounds fall within the window.

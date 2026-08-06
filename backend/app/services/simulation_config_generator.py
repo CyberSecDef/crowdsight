@@ -58,7 +58,9 @@ __all__ = [
     "SeedPost",
     "SimulationConfig",
     "SimulationConfigGenerator",
+    "demote",
     "find_verbatim",
+    "verify_scenario",
 ]
 
 Platform = Literal["twitter", "reddit"]
@@ -338,6 +340,91 @@ class SimulationConfig(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Verification
+# --------------------------------------------------------------------------
+
+
+def demote(post: SeedPost, reason: str) -> None:
+    """Reassign an unverifiable quote to the broadcaster.
+
+    Not dropped: the content is still a reasonable way to introduce the event.
+    Not trusted: a paraphrase attributed to a real person is the thing this
+    whole design is avoiding.
+    """
+    logger.warning(
+        "Seed post attributed to %r demoted to the broadcaster: %s",
+        post.speaker, reason,
+    )
+    post.demoted_reason = reason
+    post.attribution = "broadcaster"
+    post.speaker = ""
+    post.source_start = post.source_end = None
+
+
+def verify_scenario(
+    config: SimulationConfig, document: str, named_entities: Sequence[str]
+) -> list[str]:
+    """Check every claim a scenario makes about its source, and repair it.
+
+    Two things are checked because both are ways a real person can end up
+    misrepresented: the broadcaster must not be an organisation the document
+    names, and a claimed quote must actually be in the text.
+
+    Module-level rather than a method because operator edits go through it too.
+    An edit is exactly as capable of attributing an invented sentence to a real
+    person as a language model is — more so, since an operator can also supply
+    source offsets by hand. Sharing one implementation is what stops the edit
+    path from quietly becoming the weaker one.
+
+    Returns a human-readable list of the corrections made, so a caller can tell
+    an operator what happened to their edit instead of changing it silently.
+    """
+    changes: list[str] = []
+    known = {normalise_name(name) for name in named_entities} - {""}
+
+    if normalise_name(config.broadcaster.name) in known:
+        original = config.broadcaster.name
+        config.broadcaster.name = f"The {original} Wire"
+        config.broadcaster.handle = ""
+        Broadcaster.model_validate(config.broadcaster.model_dump())
+        logger.warning(
+            "Broadcaster %r collided with a named entity; renamed to %r",
+            original, config.broadcaster.name,
+        )
+        changes.append(
+            f"broadcaster {original!r} collided with a named entity and was "
+            f"renamed to {config.broadcaster.name!r}"
+        )
+
+    for index, post in enumerate(config.seed_posts):
+        if post.attribution != "named_quote":
+            # Offsets and a speaker mean nothing without a quote to anchor
+            # them, and left in place they would look like evidence.
+            post.speaker = ""
+            post.source_start = post.source_end = None
+            continue
+
+        speaker = normalise_name(post.speaker)
+        if not speaker or speaker not in known:
+            reason = "speaker is not an entity the document names"
+            demote(post, reason)
+            changes.append(f"seed post {index}: {reason}")
+            continue
+
+        # Recomputed, never trusted: an edit can carry offsets that point at
+        # text the post does not contain.
+        span = find_verbatim(document, post.content)
+        if span is None:
+            reason = "the quoted text is not in the source document"
+            demote(post, reason)
+            changes.append(f"seed post {index}: {reason}")
+            continue
+        post.source_start, post.source_end = span
+
+    return changes
+
+
+# --------------------------------------------------------------------------
 # Generation
 # --------------------------------------------------------------------------
 
@@ -429,57 +516,7 @@ class SimulationConfigGenerator:
     def _verify(
         self, config: SimulationConfig, document: str, named_entities: Sequence[str]
     ) -> None:
-        """Check every claim the model made about the source.
-
-        Two things are checked because both are ways a real person can end up
-        misrepresented: the broadcaster must not be an organisation the
-        document names, and a claimed quote must actually be in the text.
-        """
-        reserved = {normalise_name(name) for name in named_entities} - {""}
-        if normalise_name(config.broadcaster.name) in reserved:
-            original = config.broadcaster.name
-            config.broadcaster.name = f"The {original} Wire"
-            config.broadcaster.handle = ""
-            Broadcaster.model_validate(config.broadcaster.model_dump())
-            logger.warning(
-                "Broadcaster %r collided with a named entity; renamed to %r",
-                original, config.broadcaster.name,
-            )
-
-        known = {normalise_name(name) for name in named_entities} - {""}
-        for post in config.seed_posts:
-            if post.attribution != "named_quote":
-                post.speaker = ""
-                post.source_start = post.source_end = None
-                continue
-
-            speaker = normalise_name(post.speaker)
-            if not speaker or speaker not in known:
-                self._demote(post, "speaker is not an entity the document names")
-                continue
-
-            span = find_verbatim(document, post.content)
-            if span is None:
-                self._demote(post, "the quoted text is not in the source document")
-                continue
-            post.source_start, post.source_end = span
-
-    @staticmethod
-    def _demote(post: SeedPost, reason: str) -> None:
-        """Reassign an unverifiable quote to the broadcaster.
-
-        Not dropped: the content is still a reasonable way to introduce the
-        event. Not trusted: a paraphrase attributed to a real person is the
-        thing this whole design is avoiding.
-        """
-        logger.warning(
-            "Seed post attributed to %r demoted to the broadcaster: %s",
-            post.speaker, reason,
-        )
-        post.demoted_reason = reason
-        post.attribution = "broadcaster"
-        post.speaker = ""
-        post.source_start = post.source_end = None
+        verify_scenario(config, document, named_entities)
 
     async def aclose(self) -> None:
         await self.llm.aclose()

@@ -20,6 +20,8 @@ from typing import Any, Awaitable
 
 from app.config import Config, get_config
 from app.services.graph_builder import GraphBuilder
+from app.services.simulation_config_generator import SimulationConfigGenerator
+from app.services.simulation_store import SimulationStore
 from app.services.tasks import TaskRunner, TaskStore
 from app.storage.embedding_service import EmbeddingService
 from app.storage.graph_storage import GraphStorage
@@ -41,9 +43,11 @@ class Runtime:
         *,
         data_dir: str | Path | None = None,
         task_db: str | Path | None = None,
+        sim_dir: str | Path | None = None,
     ) -> None:
         self.config = config or get_config()
         self.data_dir = Path(data_dir) if data_dir else Path("data/graphs")
+        self.sim_dir = Path(sim_dir) if sim_dir else Path("data/simulations")
         self.tasks = TaskStore(task_db or "data/tasks.db")
         # Anything left running belonged to a previous process.
         self.tasks.reap_orphans()
@@ -56,6 +60,8 @@ class Runtime:
         self.search = SearchService(
             self.storage, self.config, embeddings=self.embeddings, graphs=self.graphs
         )
+        self.sims = SimulationStore(self.sim_dir)
+        self.scenarios = SimulationConfigGenerator(self.config, llm=self.llm)
         self.builder = GraphBuilder(
             self.storage, self.config, data_dir=self.data_dir,
             embeddings=self.embeddings,
