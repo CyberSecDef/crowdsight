@@ -657,8 +657,14 @@ class ProfileGenerator:
             profile.provenance = "named"
             profile.source_entity_uuid = context.uuid
             profile.source_entity_type = context.type
-            # The model will volunteer a gender for a real named person. The
-            # document did not say, so neither do we.
+            # A named agent's name comes from the graph, never from the model.
+            # The synthetic path guards against giving an invented agent a real
+            # person's name; this is the same guarantee in the other direction
+            # — a model handed "Councillor Jane Doe" can return "Jane Smith",
+            # and the resulting posts would misattribute to whoever that is.
+            profile.name = context.name
+            # The model will also volunteer a gender for a real named person.
+            # The document did not say, so neither do we.
             if not context.gender_stated:
                 profile.gender = ""
         if context.assigned_occupation:

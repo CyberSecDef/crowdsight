@@ -431,8 +431,20 @@ Validate what was written before returning, mirroring the loaders' actual access
 
 **Dependency blocker found here.** `camel-ai` 0.2.78 does `from mcp.server import FastMCP`. `mcp` 2.0 removed that export, so an unpinned install makes `import oasis` fail outright with an `ImportError` — the simulation engine cannot be loaded at all, and Phase 6 is dead on arrival. Pin `mcp>=1.9,<2`.
 
-**Step 4: Parallel generation with progress**
+**Step 4: Parallel generation with progress** ✅
 Profile generation is the second-most expensive stage. Run it as a bounded parallel job (respecting the global Ollama semaphore) with per-profile progress reporting, partial-result persistence, and resumability after interruption.
+
+**Append completed profiles to JSONL as they land**, flushed per record. A kill mid-write corrupts at most the final line, which resume discards; everything before it survives. Rewriting a JSON array after each profile is quadratic in I/O and, worse, a kill during a rewrite can truncate the file and lose everything. Flushing per profile costs nothing next to the inference call that produced the record.
+
+**Persist the plan before generating, and resume against it.** Every synthetic agent's name, occupation, age and stance is sampled randomly, so a resume that re-plans produces a *different* population from the one it was part-way through building — the run stops being reproducible across a restart. Fingerprint the plan by what it will actually generate (names and assigned occupations, in order) and refuse a resume whose fingerprint differs: splicing half of one population into another is not a resume.
+
+**Write the record before counting the profile done.** A profile reported to the progress hook but not yet flushed is lost on resume, and the count would then disagree with the file.
+
+**Failures are simply not recorded as done**, so a resume retries them. Most are transient — Ollama restarting, a model reload timing out — and a permanently unusable entity costs one agent rather than the population.
+
+Bound concurrency with a worker pool sized from `LLM_CONCURRENCY`. The Ollama gate already bounds what is in flight; the pool exists so progress arrives in completion order and three hundred coroutines are not created at once.
+
+**A named agent's name comes from the graph, never from the model.** Step 2 guards against giving an invented agent a real person's name; this is the same guarantee in the other direction. A model handed "Councillor Jane Doe" can return "Jane Smith", and the resulting posts would misattribute to whoever that is.
 
 **Step 5: Profile test units**
 **Tests:** `tests/test_profile_generator.py` — a graph entity yields a schema-valid profile; required fields are present and typed correctly; personality values fall in range.
