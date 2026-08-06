@@ -268,6 +268,97 @@ def route_by_chunk(per_chunk: dict, default=None):
     return handler
 
 
+# --------------------------------------------------------------------------
+# Population fixtures
+# --------------------------------------------------------------------------
+
+
+VALID_PERSONA = {
+    "name": "Dawn Mercer",
+    "age": 41,
+    "occupation": "carpenter",
+    "background": "Grew up in the ward and runs a two-person joinery firm.",
+    "personality": {"openness": 0.7, "conscientiousness": 0.8, "extraversion": 0.3,
+                    "agreeableness": 0.4, "neuroticism": 0.5},
+    "traits": ["blunt", "practical"],
+    "interests": ["five-a-side", "local history"],
+    "leanings": "sceptical of developers",
+    "activity_level": "moderate",
+    "writing_style": "short sentences, no punctuation fuss",
+}
+
+
+@pytest.fixture
+def persona_data() -> dict[str, Any]:
+    """A model response that should validate cleanly."""
+    return dict(VALID_PERSONA)
+
+
+@pytest.fixture
+def make_persona():
+    """Build a PersonaProfile directly, bypassing the model."""
+    from app.services.profile_generator import PersonaProfile
+
+    def _make(**overrides: Any):
+        provenance = overrides.pop("provenance", "synthetic")
+        data = {**VALID_PERSONA, **overrides}
+        profile = PersonaProfile.model_validate(data)
+        profile.provenance = provenance
+        return profile
+
+    return _make
+
+
+@pytest.fixture
+def sample_sketch():
+    from app.services.population import PopulationSketch, Stance
+
+    return PopulationSketch(
+        setting="a UK city ward facing four-storey development",
+        affected_groups=["renters", "homeowners", "commuters", "small traders"],
+        stances=[
+            Stance(label="opposed", description="Against the density increase", weight=0.4),
+            Stance(label="supportive", description="In favour of more homes", weight=0.3),
+            Stance(label="conditional", description="Supportive with conditions", weight=0.2),
+            Stance(label="indifferent", description="Not engaged", weight=0.1),
+        ],
+        min_age=20, max_age=75,
+    )
+
+
+@pytest.fixture
+def named_contexts():
+    """Entities the document names, as the graph would supply them."""
+    from app.services.profile_generator import EntityContext
+
+    return [
+        EntityContext(uuid=f"u{index}", name=name, type="Councillor",
+                      passages=["The planning committee met on Tuesday."])
+        for index, name in enumerate(
+            ["Councillor Jane Doe", "Mayor Alan Reyes", "Sarah Kim", "Tom Whitfield"]
+        )
+    ]
+
+
+@pytest.fixture
+def profile_generator(config):
+    """A generator whose LLM is mocked at the HTTP layer, with a fixed seed."""
+    import random
+
+    from app.services.profile_generator import ProfileGenerator
+    from app.utils.llm_client import LLMClient
+    from app.utils.retry import RetryPolicy
+
+    def _make(seed: int = 7, **kwargs: Any):
+        return ProfileGenerator(
+            config,
+            llm=LLMClient(config, retry_policy=RetryPolicy(max_attempts=1), **kwargs),
+            rng=random.Random(seed),
+        )
+
+    return _make
+
+
 def in_container() -> bool:
     """True when running inside a container, by the marker Docker leaves."""
     return Path("/.dockerenv").exists() or os.environ.get("CROWDSIGHT_IN_CONTAINER") == "1"

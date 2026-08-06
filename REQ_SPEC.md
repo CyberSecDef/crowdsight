@@ -446,11 +446,19 @@ Bound concurrency with a worker pool sized from `LLM_CONCURRENCY`. The Ollama ga
 
 **A named agent's name comes from the graph, never from the model.** Step 2 guards against giving an invented agent a real person's name; this is the same guarantee in the other direction. A model handed "Councillor Jane Doe" can return "Jane Smith", and the resulting posts would misattribute to whoever that is.
 
-**Step 5: Profile test units**
+**Step 5: Profile test units** ✅
 **Tests:** `tests/test_profile_generator.py` — a graph entity yields a schema-valid profile; required fields are present and typed correctly; personality values fall in range.
 `tests/test_profile_normalization.py` — LLM field-name and type drift (e.g. `age` returned as `"thirty-four"`) is normalised or rejected cleanly.
 `tests/test_synthetic_expansion.py` — requesting N agents from M named entities yields N profiles; every profile carries correct `provenance: named|synthetic`; the named/synthetic ratio is respected.
-`tests/test_oasis_profile_contract.py` — generated JSON validates against the OASIS profile schema. **This is the highest-value test in the phase** — a schema mismatch surfaces as an opaque failure deep inside the simulation engine, hours into a run.
+`tests/test_oasis_profile_contract.py` — generated files load in OASIS. **This is the highest-value test in the phase** — a schema mismatch surfaces as an opaque failure deep inside the simulation engine, hours into a run.
+
+**Assert against the real loaders, not a schema written from memory.** Import them, access every column and key exactly as they do, and hand the finished files to OASIS's own `UserInfo.to_system_message()`. A remembered schema only proves the emitter agrees with the memory.
+
+That import costs ~4 s, paid once per session via a module-scoped fixture. It runs in the **default** suite regardless, for the same reason the egress tests do: a check you have to remember to ask for is one nobody asks for, and this is the one worth paying for. The suite goes from ~2.5 s to ~6.8 s.
+
+**Verify the test has teeth by breaking the emitter.** Mutation-tested: emitting `twitter.json` instead of CSV fails 1 test; dropping the `mbti` key raises 23 errors; emitting `age` as a string raises 23. A conformance test that passes against a broken emitter is worse than none, because it certifies the mismatch.
+
+`tests/test_profile_job.py` — not in the original list, but Step 4's guarantees only fail after a crash, when nobody is watching. Covers the plan round-tripping with its assignments, fingerprint divergence, interruption and resume, a deliberately torn final line, plan-mismatch refusal, bounded parallelism, and a failed agent being retried on resume.
 
 ---
 
