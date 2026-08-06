@@ -354,5 +354,6 @@ class SimulationStore:
             "meta": meta.model_dump(),
             "config": config.model_dump(),
             "summary": config.summary(),
+            "warnings": config.warnings(),
             "editable": not meta.locked,
         }

@@ -52,6 +52,7 @@ from app.utils.llm_client import LLMClient, LLMJSONError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "POST_LENGTH_LIMIT",
     "Broadcaster",
     "ScenarioError",
     "ScheduledEvent",
@@ -68,6 +69,16 @@ Attribution = Literal["broadcaster", "named_quote"]
 
 MIN_ROUNDS = 1
 MAX_HOURS_PER_ROUND = 168.0  # a week; beyond this "rounds" stop meaning anything
+
+#: Practical ceilings on a seed post, per platform. Twitter's is the real
+#: character limit; Reddit has no meaningful one, so its value is a readability
+#: ceiling rather than a rule.
+#:
+#: Over-length posts warn instead of failing. A 400-character "tweet" is a
+#: quality problem, not a corrupt config, and rejecting one would throw away an
+#: otherwise good scenario that cost a full generation round — while the model
+#: reaches this limit often enough that failing on it would be routine.
+POST_LENGTH_LIMIT: dict[str, int] = {"twitter": 280, "reddit": 10_000}
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -280,6 +291,24 @@ class SimulationConfig(BaseModel):
 
     # -- derived ------------------------------------------------------------
 
+    def set_rounds(self, rounds: int) -> None:
+        """Change the round count, dropping any events it orphans.
+
+        The same hazard as :meth:`set_platform`: pydantic does not re-run
+        validators on assignment, so assigning ``rounds`` alone leaves events
+        scheduled past the end of the run. They never fire and nothing says so —
+        the operator sees them listed in the config and reasonably assumes they
+        will.
+        """
+        object.__setattr__(self, "rounds", max(MIN_ROUNDS, rounds))
+        kept = [e for e in self.scheduled_events if e.round <= self.rounds]
+        dropped = len(self.scheduled_events) - len(kept)
+        if dropped:
+            logger.warning(
+                "Dropped %d scheduled event(s) past round %d", dropped, self.rounds
+            )
+        object.__setattr__(self, "scheduled_events", kept)
+
     def set_platform(self, platform: Platform) -> None:
         """Switch platform *and* the action set together.
 
@@ -312,6 +341,28 @@ class SimulationConfig(BaseModel):
 
     def events_for_round(self, index: int) -> list[ScheduledEvent]:
         return [e for e in self.enabled_events() if e.round == index]
+
+    def warnings(self) -> list[str]:
+        """Quality problems an operator should see at review — not errors.
+
+        Computed, never stored: a warning written into the config file would
+        outlive the thing it complains about and still be sitting there after
+        the operator fixed it.
+        """
+        out: list[str] = []
+        limit = POST_LENGTH_LIMIT.get(self.platform, 0)
+        for index, post in enumerate(self.seed_posts):
+            if limit and len(post.content) > limit:
+                out.append(
+                    f"seed post {index} is {len(post.content)} characters; "
+                    f"{self.platform} posts are limited to {limit}"
+                )
+            if post.demoted_reason:
+                out.append(
+                    f"seed post {index} was reassigned to the broadcaster: "
+                    f"{post.demoted_reason}"
+                )
+        return out
 
     def summary(self) -> str:
         verified = sum(1 for p in self.seed_posts if p.verified)
@@ -384,9 +435,13 @@ def verify_scenario(
 
     if normalise_name(config.broadcaster.name) in known:
         original = config.broadcaster.name
-        config.broadcaster.name = f"The {original} Wire"
-        config.broadcaster.handle = ""
-        Broadcaster.model_validate(config.broadcaster.model_dump())
+        # Rebuild rather than mutate: the handle is derived by a validator, and
+        # assigning the fields in place leaves the account with no handle at all.
+        config.broadcaster = Broadcaster.model_validate({
+            **config.broadcaster.model_dump(),
+            "name": f"The {original} Wire",
+            "handle": "",
+        })
         logger.warning(
             "Broadcaster %r collided with a named entity; renamed to %r",
             original, config.broadcaster.name,
@@ -508,9 +563,11 @@ class SimulationConfigGenerator:
 
         config.graph_id = graph_id
         config.set_platform(platform)
-        config.rounds = min(config.rounds, rounds)
+        config.set_rounds(min(config.rounds, rounds))
         self._verify(config, document, named_entities)
         logger.info("Scenario derived: %s", config.summary())
+        for warning in config.warnings():
+            logger.warning("Scenario quality: %s", warning)
         return config
 
     def _verify(

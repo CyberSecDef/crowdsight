@@ -516,9 +516,21 @@ Implemented in `backend/app/services/simulation_store.py` and `backend/app/api/s
 
 HTTP surface: `POST /api/simulations` (derive, returns a task to poll), `GET /api/simulations` (list, filterable by graph), `GET /api/simulations/<sim_id>` (metadata, config and an `editable` flag), `GET|PUT /api/simulations/<sim_id>/config`. A forked edit answers `201` rather than `200`, since it created a different resource than the one addressed. `TaskProgress.await_review` gained a `stage` parameter so scenario review is distinguishable from ontology review.
 
-**Step 4: Config test units**
+**Step 4: Config test units** ✅
 **Tests:** `tests/test_simulation_config.py` — generated config validates against the schema; round count respects `MAX_ROUNDS`; scheduled event rounds fall within the window.
 `tests/test_action_space.py` — only OASIS-supported actions appear; per-platform action sets are correct; an unknown action is rejected at validation rather than at runtime.
+
+`test_action_space.py` was written in Step 2 and already passes. `test_simulation_config.py` was the real gap: Step 1 was verified with a throwaway script that never entered the repo, so the generator, the verbatim matcher and the round arithmetic had no standing coverage — only `verify_scenario`, reached indirectly through the operator-edit tests in Step 3. 78 tests now cover it directly.
+
+**Writing them found two defects in Step 1 code**, both live before this step:
+
+*The renamed broadcaster lost its handle.* When a broadcaster collided with a named organisation, `verify_scenario` set `handle = ""` and then called `Broadcaster.model_validate(...)` on a **dump**, discarding the result. The re-derivation never landed, so the account posting the seed content ended up with no username at all. The Step 1 script missed it because it only asserted the *name* had changed. Fixed by rebuilding the object rather than mutating it in place.
+
+*Capping rounds orphaned scheduled events.* `config.rounds = min(config.rounds, rounds)` is a post-validation assignment, and pydantic does not re-run validators on assignment — the identical hazard found with `platform` in Step 2, in the same function, missed at the time. A run capped from 999 to 3 rounds kept events scheduled for rounds 4 and 7: they can never fire, nothing says so, and the operator sees them listed in the config and reasonably assumes they will. Fixed with `set_rounds()`, which drops what it orphans, mirroring `set_platform()`. Two post-validation assignment bugs in one function is a pattern, not a coincidence — any further mutation of a validated `SimulationConfig` should go through a method that re-establishes the invariant.
+
+**Seed post length now warns rather than failing.** The step surfaced that seed content had no length constraint beyond "not empty"; the real run produced a 200+ character "tweet". `POST_LENGTH_LIMIT` is 280 for Twitter and 10,000 for Reddit, and `SimulationConfig.warnings()` reports over-length posts and demotions to the operator at review. Warnings are computed, never stored — a warning written into the config file would outlive the problem it describes and still be sitting there after the operator fixed it. Rejecting instead would throw away an otherwise good scenario that cost a full generation round, on a limit the model reaches routinely.
+
+**Two `integration`-marked tests run against live `qwen2.5:14b`.** The mocked tests assert against output I wrote, so they can only prove the code does what I assumed the model does; these are what notice if the model drifts into a shape the schema rejects. The second asserts the safety property end to end: whatever the model claims, every surviving `named_quote` must re-locate at exactly the offsets recorded, with a speaker the document names. Both pass (~70 s each). Full integration suite: 58 passed.
 
 ---
 
