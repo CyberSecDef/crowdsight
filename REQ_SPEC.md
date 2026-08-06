@@ -356,13 +356,21 @@ Build `backend/app/api/graph.py`: `POST /api/graph/upload` (accept file, return 
 
 Share one `Neo4jStorage`, `LLMClient` and `EmbeddingService` process-wide. The driver owns a connection pool and constructing one per request defeats it.
 
-**Step 8: Ingestion test units**
+**Step 8: Ingestion test units** ✅
 **Tests:** `tests/test_file_parser.py` — PDF/MD/TXT fixtures parse correctly; oversized files and disallowed extensions are rejected; mis-encoded input is handled.
 `tests/test_chunking.py` — chunk size and overlap are honoured; semantic boundaries preferred; a document shorter than one chunk yields exactly one chunk.
 `tests/test_ontology_generator.py` — with a mocked LLM, valid ontology JSON parses; malformed output triggers the repair loop; the resulting schema validates.
 `tests/test_ner_extractor.py` — entities extract from a fixture chunk; duplicate entities across chunks merge into one node; attribute merge conflicts resolve deterministically.
 `tests/test_graph_builder.py` — nodes and edges persist and are retrievable; provenance links back to source chunks; rebuilding the same document is idempotent.
 `tests/test_graph_api.py` — every route returns the documented shape; upload returns a task ID immediately rather than blocking; unknown `graph_id` returns 404 not 500.
+
+**Two layers for the API tests.** Route shapes, status codes and error handling run against a *stub runtime* through the Flask test client: fast, no services, and they cover the case that matters most — an unknown identifier must be 404 and not 500, because a client cannot tell "that does not exist" from "we broke" when both look the same. A smaller `integration` set drives a real upload through to a built graph, because "the build actually completes" is exactly what a stub cannot prove.
+
+`tests/test_graph_query.py` — not in the original list, but Step 6 built `graph_storage.py` and `search_service.py` and their deliberate behaviours would otherwise regress unnoticed: pagination and clamping, graph scoping, traversal depth and node caps, the refusal to route traversal through `:Chunk`, and the hybrid ranking including the lexical-before-vector order.
+
+**Fixtures build their own PDFs.** A committed binary fixture is opaque — nobody can see what a two-column PDF contains or amend it — so `make_pdf` generates single-column, two-column, scanned and encrypted PDFs in memory with PyMuPDF.
+
+**Route mocked extraction by chunk content, never by call order.** Extraction fans out with `asyncio.gather`, so a `side_effect` list is consumed in *completion* order and a test then asserts against whichever request finished first. Seven cases were silently doing this before it was noticed.
 
 ---
 

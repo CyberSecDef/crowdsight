@@ -148,6 +148,126 @@ async def storage(integration_config: Config, graph_ns: str) -> Any:
             await store.aclose()
 
 
+# --------------------------------------------------------------------------
+# Ingestion fixtures
+# --------------------------------------------------------------------------
+
+
+LEFT_COLUMN = (
+    "The council approved the housing policy on Tuesday. "
+    "Councillor Jane Doe spoke in favour of the measure. "
+    "Opposition members requested a longer consultation period."
+)
+RIGHT_COLUMN = (
+    "Meanwhile in Ward Four residents organised a petition. "
+    "Local businesses expressed concern about parking provision. "
+    "The chamber of commerce will publish its response next month."
+)
+
+COUNCIL_TEXT = (
+    "Riverbend City Council draft housing policy\n\n"
+    + LEFT_COLUMN
+    + "\n\n"
+    + RIGHT_COLUMN
+    + "\n\nMayor Alan Reyes defended the timetable. "
+    "Planning officer Sarah Kim confirmed the corridor boundaries."
+)
+
+
+@pytest.fixture
+def council_text() -> str:
+    return COUNCIL_TEXT
+
+
+@pytest.fixture
+def make_pdf():
+    """Build a PDF in memory, optionally two-column or image-only."""
+    import pymupdf
+
+    def _make(pages: int = 1, *, columns: int = 1, scanned: bool = False,
+              title: str | None = None, encrypt: bool = False) -> bytes:
+        document = pymupdf.open()
+        for index in range(pages):
+            page = document.new_page(width=595, height=842)
+            if scanned:
+                pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 200))
+                pixmap.clear_with(200)
+                page.insert_image(pymupdf.Rect(50, 50, 250, 250), pixmap=pixmap)
+                continue
+            if title:
+                page.insert_textbox(pymupdf.Rect(50, 50, 545, 90), title, fontsize=18)
+            if columns == 2:
+                page.insert_textbox(pymupdf.Rect(50, 100, 285, 700), LEFT_COLUMN, fontsize=11)
+                page.insert_textbox(pymupdf.Rect(310, 100, 545, 700), RIGHT_COLUMN, fontsize=11)
+            else:
+                page.insert_textbox(
+                    pymupdf.Rect(50, 100, 545, 750),
+                    f"Page {index + 1}. " + LEFT_COLUMN, fontsize=11,
+                )
+        if encrypt:
+            data = document.tobytes(
+                encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="owner", user_pw="user"
+            )
+        else:
+            data = document.tobytes()
+        document.close()
+        return data
+
+    return _make
+
+
+@pytest.fixture
+def sample_ontology():
+    """A small, fixed ontology so extraction tests do not depend on a model."""
+    from app.services.ontology_generator import Ontology
+
+    return Ontology.model_validate({
+        "domain": "Municipal housing policy",
+        "entity_types": [
+            {"name": "Person", "description": "An individual"},
+            {"name": "Organisation", "description": "A body"},
+            {"name": "Location", "description": "A place"},
+        ],
+        "relationship_types": [
+            {"name": "WORKS_FOR", "description": "Employment",
+             "source_types": ["Person"], "target_types": ["Organisation"]},
+            {"name": "OPPOSES", "description": "Opposition",
+             "source_types": ["Organisation"], "target_types": ["Organisation"]},
+        ],
+    })
+
+
+def chat_completion(content: str):
+    """An OpenAI-shaped chat completion carrying ``content``."""
+    import httpx
+
+    return httpx.Response(200, json={
+        "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+        "model": "qwen2.5:14b",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": content}}],
+    })
+
+
+def route_by_chunk(per_chunk: dict, default=None):
+    """Reply based on which chunk's text a request carries.
+
+    Extraction runs chunks concurrently, so a ``side_effect`` list would be
+    consumed in completion order rather than chunk order — the test would then
+    assert against whichever request happened to finish first.
+    """
+    def handler(request):
+        blob = request.content.decode()
+        for marker, response in per_chunk.items():
+            if marker in blob:
+                return response() if callable(response) else response
+        if default is not None:
+            return default() if callable(default) else default
+        return chat_completion('{"entities": [], "relationships": []}')
+
+    return handler
+
+
 def in_container() -> bool:
     """True when running inside a container, by the marker Docker leaves."""
     return Path("/.dockerenv").exists() or os.environ.get("CROWDSIGHT_IN_CONTAINER") == "1"
