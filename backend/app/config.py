@@ -201,6 +201,18 @@ class Config(BaseSettings):
     #: A window keeps personas coherent between rounds at a fixed cost, and
     #: makes a resumed run's agents the same shape as the interrupted ones.
     SIMULATION_MEMORY_ROUNDS: int = Field(default=3, ge=0)
+    #: Feed simulation outcomes back into the knowledge graph, and the graph
+    #: back into agent prompts. Off by default and deliberately so: it roughly
+    #: doubles graph writes, adds a query per round, and changes what the
+    #: simulation measures, so a run with it on is not comparable to one
+    #: without. Turn it on to study how a population's own history shapes it.
+    GRAPH_MEMORY_FEEDBACK: bool = False
+    #: Minimum engagement (likes + dislikes + reposts + comments) for a post to
+    #: be worth recording. Zero would mirror the whole run into Neo4j, which
+    #: the run's own SQLite database already holds.
+    GRAPH_MEMORY_MIN_ENGAGEMENT: int = Field(default=1, ge=0)
+    #: How many of a round's top posts reach the graph, and the agents' prompts.
+    GRAPH_MEMORY_TOP_N: int = Field(default=5, ge=1)
     MAX_AGENTS: int = Field(default=100, ge=1)
     #: How many simulations may run at once. The LLM_CONCURRENCY budget is
     #: divided by this at spawn time, so every worker's share is fixed and

@@ -122,6 +122,15 @@ async def run_simulation(
         resume=resuming,
     )
 
+    # Graph feedback is optional and off by default. Everything it needs --
+    # a Neo4j connection, the entity names to link against -- is built only
+    # when it is on, so a normal run pays nothing for it.
+    feedback = _build_feedback(config, sim_config, sim_dir) \
+        if config.GRAPH_MEMORY_FEEDBACK else None
+    if feedback:
+        logger.info("Graph memory feedback is ON for %s: outcomes will be written "
+                    "to the graph and fed back into agent prompts", sim_id)
+
     server = ControlServer(socket_path(sim_dir))
 
     async def on_ping(_request: Any) -> dict[str, Any]:
@@ -174,6 +183,9 @@ async def run_simulation(
                 logger.info("Stopping %s before round %d", sim_id, index)
                 break
             state.round = index
+            if feedback is not None:
+                await _refresh_graph_memory(feedback, runner, sim_id,
+                                            sim_config.graph_id, index)
             marks_before = ledger.marks()
             summary = await runner.run_round(index)
             summary.action_counts = ledger.action_counts(marks_before)
@@ -181,6 +193,10 @@ async def run_simulation(
             # that did not finish would be a lie the resume then trusts.
             _checkpoint(ledger, summary)
             state.rounds.append(summary.to_dict())
+            if feedback is not None:
+                await _write_graph_memory(feedback, ledger, runner, sim_id,
+                                          sim_config.graph_id, index,
+                                          database_path)
         else:
             state.stage = "complete"
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
@@ -199,8 +215,59 @@ async def run_simulation(
         state.progress = ledger.progress(sim_config.rounds)
         await runner.close()
         await server.close()
+        if feedback is not None:
+            await feedback["storage"].aclose()
 
     return state.snapshot()
+
+
+def _build_feedback(config: Any, sim_config: Any, sim_dir: Path) -> dict[str, Any] | None:
+    """Everything the graph feedback needs, or nothing if it cannot be had."""
+    from app.services.graph_memory_updater import GraphMemoryUpdater
+    from app.storage.neo4j_storage import Neo4jStorage
+
+    if not sim_config.graph_id:
+        logger.warning("Graph memory feedback is on but this scenario has no "
+                       "graph_id; skipping it")
+        return None
+    try:
+        storage = Neo4jStorage(config)
+        return {
+            "storage": storage,
+            "updater": GraphMemoryUpdater(storage, config=config),
+        }
+    except Exception:  # noqa: BLE001 - a run must not die for want of feedback
+        logger.exception("Could not start graph memory feedback; continuing without")
+        return None
+
+
+async def _refresh_graph_memory(feedback: dict[str, Any], runner: Any, sim_id: str,
+                                graph_id: str, round_index: int) -> None:
+    """Fetch what the population remembers, once, for the whole round."""
+    try:
+        text = await feedback["updater"].context_for(
+            sim_id=sim_id, graph_id=graph_id, before_round=round_index)
+        runner.graph_memory["text"] = text
+    except Exception:  # noqa: BLE001 - feedback is optional; the run is not
+        logger.exception("Could not read graph memory for round %d", round_index)
+
+
+async def _write_graph_memory(feedback: dict[str, Any], ledger: Any, runner: Any,
+                              sim_id: str, graph_id: str, round_index: int,
+                              database_path: Path) -> None:
+    """Write one round's notable outcomes into the graph."""
+    try:
+        usernames = {agent_id: (record.get("username") or "")
+                     for agent_id, record in runner.profiles.items()}
+        post_ids = ledger.posts_by_round().get(round_index, [])
+        entities = await feedback["updater"].entity_names(graph_id)
+        outcome = feedback["updater"].collect(
+            database_path, round_index=round_index, post_ids=post_ids,
+            usernames=usernames, entity_names=entities)
+        await feedback["updater"].write_round(
+            outcome, sim_id=sim_id, graph_id=graph_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not write graph memory for round %d", round_index)
 
 
 def _checkpoint(ledger: Any, summary: Any) -> None:

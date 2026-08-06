@@ -103,6 +103,10 @@ everything else here, never leaves the perimeter.
   killable, checkpointed, and resumable.
 - **Agent interviews** — question any agent (or all of them) mid-run or after, in
   character and with its accumulated memory, over the live IPC channel.
+- **Graph memory feedback (optional)** — simulation outcomes written back to Neo4j and
+  fed into later rounds' prompts, under their own `Sim*` labels so invented content is
+  never confused with what the source document said. Off by default: it changes what the
+  simulation measures, so a run with it on is not comparable with one without.
 - **Grounded reports** — executive summary, sentiment trajectory, dominant and
   counter-narratives, influential agents, emergent behaviour, and caveats — with every
   claim citing specific post IDs, agent IDs, and round numbers.
@@ -342,6 +346,9 @@ docker compose exec backend python -m app.config
 | `MAX_CONCURRENT_SIMULATIONS` | `2` (the budget is divided by this at spawn) |
 | `API_LLM_RESERVE` | `1` (held back so the API still answers during a run) |
 | `SIMULATION_MEMORY_ROUNDS` | `3` (how many past turns an agent keeps) |
+| `GRAPH_MEMORY_FEEDBACK` | `false` (write outcomes to the graph and back into prompts) |
+| `GRAPH_MEMORY_MIN_ENGAGEMENT` | `1` (reactions a post needs to be recorded) |
+| `GRAPH_MEMORY_TOP_N` | `5` (posts per round reaching the graph) |
 | `LLM_TIMEOUT` / `LLM_CONNECT_TIMEOUT` | `300` / `10` seconds |
 | `LLM_MAX_ATTEMPTS` | `3` |
 | `LLM_RETRY_BASE_DELAY` / `LLM_RETRY_MAX_DELAY` | `1.0` / `30.0` seconds |

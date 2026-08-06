@@ -61,6 +61,7 @@ __all__ = [
     "SimulationError",
     "SimulationRunner",
     "build_model",
+    "attach_graph_memory",
     "harden_agent",
     "trim_agent_memory",
 ]
@@ -198,6 +199,32 @@ def harden_agent(agent: "SocialAgent", summary_ref: list[RoundSummary]) -> None:
     agent._crowdsight_hardened = True  # type: ignore[attr-defined]
 
 
+def attach_graph_memory(agent: "SocialAgent", context: dict[str, str]) -> None:
+    """Let what the graph remembers reach this agent's prompt.
+
+    Wraps the agent's own environment rendering rather than its turn, so the
+    recalled history arrives as part of what the agent observes — the same
+    channel as its feed — instead of as a second instruction competing with the
+    persona.
+
+    ``context`` is a single mutable dict shared by the whole population and
+    refreshed once per round. Reading the graph per agent would be a round trip
+    per agent per round, which is the expensive part of an expensive loop.
+    """
+    if getattr(agent, "_crowdsight_graph_memory", False):
+        return
+
+    original = agent.env.to_text_prompt
+
+    async def with_memory(*args: Any, **kwargs: Any) -> str:
+        prompt = await original(*args, **kwargs)
+        recalled = context.get("text") or ""
+        return f"{prompt}\n\n{recalled}" if recalled else prompt
+
+    agent.env.to_text_prompt = with_memory  # type: ignore[method-assign]
+    agent._crowdsight_graph_memory = True  # type: ignore[attr-defined]
+
+
 def trim_agent_memory(agent: "SocialAgent", keep_turns: int) -> int:
     """Bound one agent's memory to its most recent turns.
 
@@ -271,6 +298,9 @@ class SimulationRunner:
         self.concurrency = concurrency or self.config.LLM_CONCURRENCY
         self.resume = resume
         self.memory_rounds = self.config.SIMULATION_MEMORY_ROUNDS
+        #: Refreshed once per round when graph memory feedback is on, and read
+        #: by every agent's prompt through the wrapper installed at setup.
+        self.graph_memory: dict[str, str] = {"text": ""}
         self.action_space: ActionSpace = (
             sim_config.action_space or default_action_space(sim_config.platform)
         )
@@ -439,6 +469,8 @@ class SimulationRunner:
 
         for _, agent in graph.get_agents():
             harden_agent(agent, self._current)
+            if self.config.GRAPH_MEMORY_FEEDBACK:
+                attach_graph_memory(agent, self.graph_memory)
 
         platform = (DefaultPlatformType.TWITTER
                     if self.sim_config.platform == "twitter"

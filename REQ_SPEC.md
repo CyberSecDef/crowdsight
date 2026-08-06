@@ -621,8 +621,22 @@ Implemented in `simulation_persistence.py`, with the round loop in `simulation_w
 
 **Tests:** `tests/test_simulation_persistence.py` (round attribution, marks, action counts, rollback) and `tests/test_simulation_resume.py` (the half-applied round, plus an `integration` test that SIGKILLs a live simulation and resumes it).
 
-**Step 4: Graph memory feedback (optional, flagged)**
+**Step 4: Graph memory feedback (optional, flagged)** ✅
 Optionally feed significant simulation outcomes back into the Neo4j graph as new nodes and edges, so agent memory evolves across rounds. Build `backend/app/services/graph_memory_updater.py`. Keep this behind a config flag — it roughly doubles graph writes and materially increases run time. Upstream's equivalent was the single most complex and most-tested subsystem; treat it as genuinely hard and do not attempt it before Phases 1–7 are green.
+
+Built ahead of the spec's own advice, at the operator's direction — Phase 7 is not yet green, so the caution above still stands and the flag is off by default. Verified against a live Neo4j (17/17) and by a real run with the flag on (6/6).
+
+**The loop is genuinely closed.** Outcomes are written to the graph after each round *and* read back into the agents' prompts before the next, which is the stronger reading of "agent memory evolves across rounds". It is fetched **once per round and shared** by the whole population: the obvious design — each agent consults the graph on its turn — is a Neo4j round trip per agent per round, three hundred of them inside what is already the expensive part of a run. The recollection is appended to what the agent *observes*, alongside its feed, rather than injected as a second instruction competing with the persona.
+
+**Simulated content is kept visibly apart from the document.** Everything written carries its own `SimRun`/`SimAgent`/`SimPost` labels and a `sim_id`, and is never merged into the `:Entity` nodes extracted from the source. The single edge that touches document-derived data is named for exactly what it means — a simulated post is `:ABOUT` a real entity — and only ever points at the entity, never writes to it. Tests assert the Cypher itself: no create clause mentions `:Entity`, and the one query that does contains no `SET e.`. Against a live Neo4j, a document entity survives a full round of feedback with its labels unchanged, no `:Entity` ever acquires a `sim_id`, and deleting a run's subgraph leaves the document's graph intact. This is the line Phases 4 and 5 spent their effort drawing: reproducing what a document says is not fabrication, inventing statements for a named person is.
+
+**Significance is engagement, computed rather than judged.** Likes, reposts and replies are already counted in the run's own database, cost nothing, and give the same round the same answer twice. Asking the model each round which narratives emerged would be richer but adds an inference to the critical path of a GPU the agents have already saturated, and is not reproducible. Which posts belong to which round comes from Step 3's recorded boundaries — OASIS records no round anywhere, so it is not otherwise knowable. Entity links are by name match against the graph's own entity list, fetched once per run and cached, with names under four characters ignored because a two-letter name matches half a corpus.
+
+**A real run showed the threshold working as designed rather than a fault.** With two agents nobody liked anybody, so the default `GRAPH_MEMORY_MIN_ENGAGEMENT` of 1 correctly recorded no posts — the feedback ran, wrote the follow graph, and stored nothing not worth storing. Re-running with the threshold at 0 exercised the whole path and confirmed the recalled context reaching a genuine agent prompt.
+
+Config: `GRAPH_MEMORY_FEEDBACK` (default off), `GRAPH_MEMORY_MIN_ENGAGEMENT` (1), `GRAPH_MEMORY_TOP_N` (5). Feedback failures are logged and swallowed — an optional enrichment must never take down a run that is hours old. **A run with the flag on is not comparable with one without it**, so the flag is a statement about what experiment is being conducted, not a performance knob.
+
+**Tests:** `tests/test_graph_memory.py` — 27 unit tests plus an `integration` test that asserts the simulated/documented line holds against a live Neo4j.
 
 **Step 5: Simulation control API**
 Build `backend/app/api/simulation.py`: `POST /api/simulation/create`, `POST /api/simulation/prepare` (async profile + config generation, returns task ID), `GET /api/simulation/prepare/status`, `GET /api/simulation/<id>/config`, `GET /api/simulation/<id>/profiles`, `POST /api/simulation/start`, `POST /api/simulation/stop`, `GET /api/simulation/list`.
