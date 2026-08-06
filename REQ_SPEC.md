@@ -240,8 +240,20 @@ Reject password-protected PDFs by name too, rather than letting the driver fail 
 
 **Encoding detection needs two gates, and neither alone suffices.** Try a BOM, then a strict UTF-8 decode (what most files actually are, and it either succeeds exactly or fails cleanly). Only then run statistical detection, restricted to a curated candidate list — over the full codepage space, ten bytes of Latin-1 are confidently reported as Cyrillic. Accept the guess only when there is evidence to judge it: **coherence ≥ 0.1 or at least ~128 bytes of input**. Coherence alone rejects correctly-detected Japanese, which scores 0.000 because the metric does not apply to CJK; length alone accepts confident nonsense on long inputs of an exotic encoding. Fall back to cp1252, then UTF-8 with replacement — a few substituted characters in a long document is recoverable, and refusing the upload is not obviously better.
 
-**Step 2: Chunking**
-Split extracted text into overlapping chunks (default 500 characters, 50 overlap). Prefer semantic boundaries — split on paragraph then sentence before falling back to hard character cuts — so entity mentions are not severed mid-phrase.
+**Step 2: Chunking** ✅
+Split extracted text into overlapping chunks. Prefer semantic boundaries — split on paragraph then sentence before falling back to hard character cuts — so entity mentions are not severed mid-phrase.
+
+**Defaults are 1500/150, not the 500/50 this spec originally gave.** Each chunk is one LLM extraction call in Step 4, so chunk size sets ingestion cost as well as context: a 40-page report is ~220 calls at 500 and ~73 at 1500. More importantly, 500 characters is about three sentences, and a relationship stated across sentences is then routinely severed at a boundary. Both remain configurable.
+
+**`CHUNK_SIZE` is a hard ceiling that includes the overlap.** The alternative — size counting only new content — makes a chunk's real length depend on how long the preceding sentence happened to be, so a 200-character setting quietly produces 340-character chunks. Anything downstream sizing a prompt window against `CHUNK_SIZE` would then be wrong by an unpredictable amount.
+
+**Every chunk must be an exact slice of the source**: `text == source[chunk.start:chunk.end]`. Step 5 has to trace each graph node back to the text that produced it, and offsets that merely approximate the source make that provenance a guess. Build chunks as spans rather than as concatenated strings, so the property is structural rather than something to remember.
+
+**Back up over whole sentences for the overlap, not whole units.** When paragraphs fit inside the chunk size they become the packing unit, and a paragraph is routinely larger than the overlap budget — so a unit-granular search finds nothing that fits and overlap silently does nothing at all. Sentences are the granularity that makes repeated text readable prose rather than a fragment starting mid-clause. Skip a trailing sentence longer than the budget rather than truncating it: chunks already break at sentence boundaries, so no mention is severed and overlap is buying continuity, not repair.
+
+**Sentence splitting is regex-based with an abbreviation list.** A statistical splitter would be another model to provision inside a sealed deployment. Handle titles (`Cllr. Jane Doe` must not split), initials (`J. R. Smith`), decimals (`3.5`), and lowercase continuations (`fig. 4`) — a title severed from its name removes exactly the context the extractor needs to classify it.
+
+**Related: the PDF parser must join blocks with a blank line**, not a single newline. Blocks are broadly paragraphs, and joining them with `\n` makes a whole page look like one paragraph, pushing chunking straight to its sentence fallback.
 
 **Step 3: Ontology generation**
 Build `backend/app/services/ontology_generator.py`. Given a document sample, ask the LLM to propose a domain-appropriate ontology: entity types (e.g. Person, Organisation, Policy, Location, Product, Event) and relationship types, each with a description and expected attributes. This adapts the graph to the document's domain instead of forcing a fixed schema. Return validated JSON; allow the operator to review and override before extraction proceeds.

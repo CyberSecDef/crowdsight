@@ -191,8 +191,12 @@ class Config(BaseSettings):
     REPORT_TEMPERATURE: float = Field(default=0.5, ge=0.0, le=2.0)
 
     # --- Document ingestion --------------------------------------------------
-    CHUNK_SIZE: int = Field(default=500, ge=1)
-    CHUNK_OVERLAP: int = Field(default=50, ge=0)
+    # 1500 characters is roughly a paragraph or two, so a relationship stated
+    # across sentences survives inside one chunk. Each chunk is one LLM
+    # extraction call in Phase 3 Step 4, so this also sets ingestion cost:
+    # at 500 a 40-page report is ~220 calls, at 1500 it is ~73.
+    CHUNK_SIZE: int = Field(default=1500, ge=1)
+    CHUNK_OVERLAP: int = Field(default=150, ge=0)
     MAX_CONTENT_LENGTH: int = Field(default=50 * 1024 * 1024, ge=1)
     ALLOWED_EXTENSIONS: Annotated[frozenset[str], NoDecode] = frozenset(
         {"pdf", "md", "txt", "markdown"}

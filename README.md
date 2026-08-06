@@ -318,7 +318,7 @@ docker compose exec backend python -m app.config
 | `MAX_ROUNDS` | `10` |
 | `MAX_AGENTS` | `100` |
 | `REPORT_TEMPERATURE` | `0.5` |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `500` / `50` |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1500` / `150` characters |
 | `MAX_CONTENT_LENGTH` | 50 MB |
 | `ALLOWED_EXTENSIONS` | `pdf, md, txt, markdown` |
 | `ALLOWED_HOSTS` | empty |

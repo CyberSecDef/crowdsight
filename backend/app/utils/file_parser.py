@@ -360,7 +360,11 @@ def _parse_pdf(data: bytes, filename: str) -> tuple[str, int, dict[str, Any]]:
         pages: list[str] = []
         for page in document:
             blocks = [b for b in page.get_text("blocks") if len(b) > 6 and b[6] == 0]
-            pages.append("\n".join(_order_blocks(blocks, page.rect.width)))
+            # Blank line between blocks: PyMuPDF blocks are broadly
+            # paragraphs, and the chunker splits on paragraph first. Joining
+            # with a single newline would make a whole page look like one
+            # paragraph and push chunking straight to its sentence fallback.
+            pages.append("\n\n".join(_order_blocks(blocks, page.rect.width)))
 
         metadata = {
             key: value
