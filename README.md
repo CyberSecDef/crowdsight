@@ -42,6 +42,14 @@ prompt or simulation data stays sealed.
 The only step requiring internet access is one-time provisioning (pulling model weights
 and packages), after which the stack runs sealed.
 
+Provisioning includes assets that are easy to miss because they are fetched lazily at
+*runtime* by a dependency rather than installed by pip. camel resolves a tiktoken BPE
+encoding the moment a `ChatAgent` is constructed, and tiktoken downloads it on first
+use — inside the seal that is a DNS failure, and agent construction dies before any
+model is contacted. The image therefore bakes the encodings into
+`TIKTOKEN_CACHE_DIR=/opt/tiktoken` at build time. If you rebuild without a network,
+copy that directory forward.
+
 ### Designated endpoints — the complete allowlist
 
 | Purpose | Endpoint | Protocol |
@@ -376,11 +384,12 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 618 tests: 562 unit (no services, ~7s) and 56 integration against live
+The suite is 663 tests: 607 unit (no services, ~7s) and 56 integration against live
 Neo4j and Ollama (~85s), including a real document upload driven through to a built
-graph. `test_oasis_profile_contract.py` runs in the default suite despite costing
-~4s to import OASIS: it is the check that a simulation will actually load its
-agents, and it is worth always running.
+graph. `test_oasis_profile_contract.py` and `test_action_space.py` run in the default
+suite despite costing ~4s to import OASIS: they are the checks that a simulation will
+actually load its agents and that those agents will actually be able to act, and they
+are worth always running.
 
 Integration tests (`test_simulation_smoke.py`, `test_e2e_pipeline.py`) run real micro-runs
 against local Ollama and are required before any release.
@@ -396,8 +405,10 @@ host it shells in via `docker compose exec`. The topology assertions (network fl
 bindings, gateway) inspect the Docker daemon and so run host-side only.
 
 Other high-value tests: `test_oasis_profile_contract.py` (schema mismatches otherwise
-surface hours into a run), `test_ollama_model_binding.py` (no code path can construct a
-cloud model), and `test_report_grounding.py` (every citation resolves to real run data).
+surface hours into a run), `test_action_space.py` (OASIS answers an unrecognised action
+with a log line and a silently shorter tool list, so a typo yields an agent that simply
+never acts), `test_ollama_model_binding.py` (no code path can construct a cloud model),
+and `test_report_grounding.py` (every citation resolves to real run data).
 
 ---
 

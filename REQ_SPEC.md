@@ -482,8 +482,22 @@ Drop events scheduled past the final round rather than letting them silently nev
 
 Normalise the broadcaster's name and handle rather than merely filling them: models return handles that already carry an `@` (producing `@@RB_Echo` when a display layer adds its own) and put the `@` in the display name just as often.
 
-**Step 2: Action space configuration**
+**Step 2: Action space configuration** ✅
 Define the permitted action set per platform, matching OASIS's supported actions. Twitter: `CREATE_POST, LIKE_POST, REPOST, FOLLOW, QUOTE_POST, DO_NOTHING`. Reddit: `LIKE_POST, DISLIKE_POST, CREATE_POST, CREATE_COMMENT, LIKE_COMMENT, DISLIKE_COMMENT, SEARCH_POSTS, SEARCH_USER, TREND, REFRESH, FOLLOW, MUTE, DO_NOTHING`. Include `DO_NOTHING` — populations that always act are unrealistic and inflate cost.
+
+Implemented in `backend/app/services/action_space.py`. Both lists above were checked against the installed camel-oasis 0.2.5 and are valid as written; no correction was needed. Three findings from reading the source shaped the implementation.
+
+**OASIS does not reject a bad action — it warns and drops it.** `SocialAgent.__init__` (`social_agent/agent.py:92-102`) logs `"Action X is not supported"` through its own logger and then filters the tool list. Verified against a real `SocialAgent`: `["like_postz", "creat_post"]` produced **zero tools**, and an agent with no tools does nothing for the entire run. Nothing raises. That is why the action space is validated here, before a run starts, rather than trusted to the engine.
+
+**29 of the 32 `ActionType` members are agent-invokable.** `EXIT`, `SIGNUP` and `UPDATE_REC_TABLE` are driven by the engine and have no tool. A further seven (`PURCHASE_PRODUCT`, `INTERVIEW`, and the five group actions) belong to OASIS's shopping, group and research-probe scenarios; they are rejected for a discourse simulation, with a message saying so. `AGENT_INVOKABLE` is mirrored as a constant rather than imported — `import oasis` costs ~4 s — and `tests/test_action_space.py` diffs the mirror against the real enum so a version bump that changes the action list fails the suite.
+
+**`recsys_type` does not restrict actions.** It selects the recommender and the system-message wording only; every action works on both platforms. The per-platform split is therefore a realism constraint we impose, not one OASIS enforces, and an off-platform action (`REPOST` on Reddit) is refused at validation.
+
+**Inactivity is modelled twice, deliberately.** `DO_NOTHING` alone does not make a quiet population cheap: choosing it still costs a full inference, so a 300-agent run pays 300 calls a round however inert the crowd. `select_active()` rolls each agent's `activity_level` (low 0.20, moderate 0.55, high 0.90) before the round and omits the quiet ones from the step dict entirely, which costs nothing. Agents who *are* invoked keep `DO_NOTHING`, so "looked and said nothing" stays distinct from "was not looking". Measured on a mixed 300-agent crowd: 158 invoked, 142 inferences saved per round.
+
+`SimulationConfig` gained an `action_space` field. Two hazards it has to survive: pydantic does not re-run validators on assignment, so `config.platform = "reddit"` alone would leave a Reddit run holding Twitter's action set (agents unable to comment or downvote, with no error) — `set_platform()` moves both together and is the only supported path. And because the field is in the schema the generating model is shown, a model that helpfully emits `["CREATE_POST"]` would fail validation for a missing `DO_NOTHING` and take the whole scenario down; a model-supplied action space is therefore discarded unless it arrives from a trusted source, which `load()` marks via validation context.
+
+**Sealed-network defect found and fixed here.** Constructing any camel `ChatAgent` resolves a tiktoken BPE encoding, which tiktoken downloads from `openaipublic.blob.core.windows.net` on first use. Inside the sealed network that fails with a DNS error, so *agent construction itself* was impossible — a Phase 6 blocker unrelated to the model backend. The `Dockerfile` now bakes `o200k_base`, `cl100k_base`, `p50k_base` and `r50k_base` into `TIKTOKEN_CACHE_DIR=/opt/tiktoken` at build time, when the network is still available.
 
 **Step 3: Config persistence and override**
 Write the generated config to `data/simulations/<sim_id>/config.json` and expose it for operator review and editing before the run starts. Generated scenarios are frequently *almost* right; a human edit pass materially improves output quality.

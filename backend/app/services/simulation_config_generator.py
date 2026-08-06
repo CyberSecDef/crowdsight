@@ -35,9 +35,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from app.config import Config, get_config
+from app.services.action_space import ActionSpace, default_action_space
 from app.services.ontology_generator import Ontology
 from app.storage.ner_extractor import normalise_name
 from app.utils.llm_client import LLMClient, LLMJSONError
@@ -207,7 +214,27 @@ class SimulationConfig(BaseModel):
     broadcaster: Broadcaster
     seed_posts: list[SeedPost] = Field(default_factory=list)
     scheduled_events: list[ScheduledEvent] = Field(default_factory=list)
+    action_space: ActionSpace | None = None
     notes: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _the_model_does_not_choose_the_action_space(
+        cls, data: Any, info: ValidationInfo
+    ) -> Any:
+        """Generation must not be able to fail on a field it was never asked for.
+
+        ``action_space`` is a field so it round-trips through disk, which also
+        puts it in the schema the model is shown. A model that helpfully emits
+        ``["CREATE_POST"]`` would then fail validation for a missing DO_NOTHING
+        and take the whole scenario down with it. The platform decides this, not
+        the model, so an action space is honoured only when it comes from a
+        trusted source — ``load()`` and ``set_platform()`` pass that context.
+        """
+        trusted = bool((info.context or {}).get("trusted"))
+        if not trusted and isinstance(data, dict) and "action_space" in data:
+            data = {k: v for k, v in data.items() if k != "action_space"}
+        return data
 
     @field_validator("event")
     @classmethod
@@ -240,9 +267,33 @@ class SimulationConfig(BaseModel):
             object.__setattr__(
                 self, "start_time", datetime.now(timezone.utc).isoformat(timespec="seconds")
             )
+        if self.action_space is None:
+            object.__setattr__(self, "action_space", default_action_space(self.platform))
+        elif self.action_space.platform != self.platform:
+            raise ValueError(
+                f"action space is for {self.action_space.platform!r} but the "
+                f"simulation runs on {self.platform!r}"
+            )
         return self
 
     # -- derived ------------------------------------------------------------
+
+    def set_platform(self, platform: Platform) -> None:
+        """Switch platform *and* the action set together.
+
+        ``platform`` is assigned after validation during generation, and pydantic
+        does not re-run validators on assignment. Setting the attribute alone
+        would leave a Reddit run holding Twitter's action space — no error, just
+        agents that cannot comment or downvote. This is the only supported way
+        to change it.
+        """
+        object.__setattr__(self, "platform", platform)
+        object.__setattr__(self, "action_space", default_action_space(platform))
+
+    @property
+    def actions(self) -> list[str]:
+        """The permitted action names. Never ``None`` after validation."""
+        return list(self.action_space.actions) if self.action_space else []
 
     def round_time(self, index: int) -> str:
         """Wall-clock time the simulation pretends round ``index`` happens at."""
@@ -264,7 +315,8 @@ class SimulationConfig(BaseModel):
         verified = sum(1 for p in self.seed_posts if p.verified)
         enabled = len(self.enabled_events())
         return (
-            f"{self.platform}, {self.rounds} rounds x {self.hours_per_round}h; "
+            f"{self.platform}, {self.rounds} rounds x {self.hours_per_round}h, "
+            f"{len(self.actions)} actions; "
             f"{len(self.seed_posts)} seed post(s) ({verified} verified quote(s)); "
             f"{len(self.scheduled_events)} scheduled event(s), {enabled} enabled"
         )
@@ -279,7 +331,10 @@ class SimulationConfig(BaseModel):
 
     @classmethod
     def load(cls, path: str | Path) -> "SimulationConfig":
-        return cls.model_validate_json(Path(path).read_text(encoding="utf-8"))
+        """A file we wrote is trusted, so its action space survives the round trip."""
+        return cls.model_validate_json(
+            Path(path).read_text(encoding="utf-8"), context={"trusted": True}
+        )
 
 
 # --------------------------------------------------------------------------
@@ -365,7 +420,7 @@ class SimulationConfigGenerator:
             raise ScenarioError(f"Scenario generation failed: {exc}") from exc
 
         config.graph_id = graph_id
-        config.platform = platform
+        config.set_platform(platform)
         config.rounds = min(config.rounds, rounds)
         self._verify(config, document, named_entities)
         logger.info("Scenario derived: %s", config.summary())

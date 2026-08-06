@@ -32,6 +32,17 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install -r requirements.txt \
     && apt-get purge -y --auto-remove build-essential
 
+# camel resolves a tiktoken BPE encoding when a ChatAgent is constructed, and
+# tiktoken fetches it from openaipublic.blob.core.windows.net on first use. The
+# sealed runtime network has no egress, so that download fails and agent
+# construction dies with a DNS error — nothing to do with the model backend.
+# Bake the encodings now, while the build still has a network. Discovered while
+# verifying Phase 5 Step 2 against a real SocialAgent.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN mkdir -p "${TIKTOKEN_CACHE_DIR}" \
+    && python -c "import tiktoken; [tiktoken.get_encoding(n) for n in ('o200k_base', 'cl100k_base', 'p50k_base', 'r50k_base')]" \
+    && chmod -R a+rX "${TIKTOKEN_CACHE_DIR}"
+
 COPY backend/ /app/
 
 # Match the host UID so the bind-mounted ./data stays writable. Override at
