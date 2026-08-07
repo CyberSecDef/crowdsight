@@ -694,8 +694,20 @@ All four implemented, reading through `backend/app/services/run_reader.py`. Veri
 
 **The Phase 2 Cypher audit caught this code**, correctly by shape: Neo4j also has `CREATE INDEX ... ON`, and the index DDL interpolates its identifiers. SQL cannot parameterise a table name any more than Cypher can, so rather than silence the guard, the identifiers now go through a validator that refuses anything which is not a bare identifier — the same reasoning as `escape_identifier` in the Neo4j layer — and the statement carries the sanctioned exemption marker with that justification. The same treatment was applied to the ledger's generalised `rows_by_round` query.
 
-**Step 2: Content access endpoints**
+**Step 2: Content access endpoints** ✅
 Implement paginated `GET /api/simulation/<id>/actions` (filter by platform, agent, round), `GET /api/simulation/<id>/posts`, `GET /api/simulation/<id>/comments` (optionally filtered by post). Enforce sane page limits — a large run holds tens of thousands of rows.
+
+All three implemented on `RunReader`. Verified against a real completed run: 13/13 checks, plus a further check for the correction below.
+
+**The `platform` filter cannot mean what it says, so it validates instead.** A simulation is configured with exactly one platform and OASIS's trace table has no platform column — every action in a run is on the same one. Accepting the parameter and ignoring it would hand a full result set to a caller who believes they filtered it, so a mismatch is a `400` naming the run's actual platform. In its place is an `action=create_post,like_post` filter, which is the one that is actually useful and which the spec's list has no equivalent for.
+
+**Page limits are capped in the reader, not trusted from the query string.** `limit=99999` returns `MAX_PAGE`, because a limit a caller can raise is not a limit. Every response carries `total`, `has_more` and `next_offset`, an offset past the end is an empty page rather than an error, and `order=newest|oldest` covers both a feed view and a chronological read. Filters compose rather than override — `agent=2&round=1&action=like_post` narrows at each step.
+
+**Round filtering happens in SQL, over the recorded boundaries.** A round is a rowid window, so filtering by it uses the primary index instead of reading every row to find the few that belong. A round with no recorded boundary returns nothing rather than everything, since a missing filter reading as "that round was enormous" is the worse failure.
+
+**Reading a real run found engine bookkeeping in the feed.** The oldest entry was `sign_up`: OASIS traces agent registration alongside agent decisions, so a three-hundred agent run opens with three hundred sign-ups before anything a person chose to do. These are the `ActionType` members Phase 6 Step 2 established have no agent tool, and they are now excluded by default, with `include_engine=true` to see them. Confirmed on the real run: 8 decisions by default, 12 entries with registration included.
+
+Posts additionally report what they drew — likes, dislikes, reposts and reply count as a single `engagement` figure — and are classified `original`, `repost` or `quote`, which OASIS encodes across two nullable columns. `population_only=true` excludes the broadcaster's announcements, for the same reason as in Step 1.
 
 **Step 3: Agent interview**
 Implement `POST /api/simulation/interview` (ask one agent a question mid-run, in character and with its accumulated memory), `POST /api/simulation/interview/batch`, `POST /api/simulation/interview/all`, and `POST /api/simulation/interview/history`. Interviews route through the IPC channel into the live simulation process. This is the feature that turns a simulation into an instrument you can probe — prioritise it.

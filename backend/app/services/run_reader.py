@@ -32,7 +32,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from app.services.simulation_persistence import RunLedger
 
@@ -57,6 +57,14 @@ INDEXES: tuple[tuple[str, str, str], ...] = (
 )
 
 MAX_PAGE = 500
+
+#: Trace entries the engine writes for itself, not decisions an agent made.
+#: Phase 6 Step 2 established these as the ActionType members with no agent
+#: tool. They are excluded from the action feed by default: a three-hundred
+#: agent run opens with three hundred sign-ups, and a reader scrolling for
+#: what the population did should not have to page past them.
+ENGINE_ACTIONS: frozenset[str] = frozenset({"sign_up", "signup", "exit",
+                                            "update_rec_table"})
 
 #: SQL cannot parameterise an identifier, so table and column names are
 #: interpolated. Every one comes from a constant in this module and is checked
@@ -275,9 +283,12 @@ class RunReader:
             with self._connect() as connection:
                 if "trace" not in self._tables(connection):
                     return []
+                engine = sorted(ENGINE_ACTIONS)
                 rows = connection.execute(
                     "SELECT rowid AS rid, user_id, created_at, action, info "
-                    "FROM trace ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
+                    f"FROM trace WHERE LOWER(action) NOT IN "
+                    f"({','.join('?' * len(engine))}) "
+                    "ORDER BY rowid DESC LIMIT ?", (*engine, limit)).fetchall()
         except sqlite3.Error as exc:
             raise RunNotReadable(f"Could not read the action log: {exc}") from exc
 
@@ -433,6 +444,264 @@ class RunReader:
                                         "reposts": int(row["reposts"] or 0)}
         return out
 
+    # -- content ------------------------------------------------------------
+
+    def _round_range(self, table: str, round_index: int | None) -> tuple[int, int] | None:
+        """The rowid window one round wrote, or ``None`` for no restriction.
+
+        Filtering by round in SQL rather than in Python: the alternative is
+        reading every row to find the few that belong to a round, which on a
+        large run is the whole table.
+        """
+        if round_index is None:
+            return None
+        for index, lower, upper in self._round_bounds(table):
+            if index == round_index:
+                return lower, upper
+        # A round with no boundary recorded is either still open or never ran.
+        # An empty window is the honest answer; a missing one would return
+        # everything, which reads as "that round was enormous".
+        return (-1, -1)
+
+    def _page(
+        self,
+        *,
+        table: str,
+        columns: str,
+        where: list[str],
+        params: list[Any],
+        limit: int,
+        offset: int,
+        order: str,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """One page of a table, plus how many rows matched in total."""
+        table = identifier(table)
+        limit = max(1, min(int(limit), MAX_PAGE))
+        offset = max(0, int(offset))
+        direction = "DESC" if order != "oldest" else "ASC"
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+
+        try:
+            with self._connect() as connection:
+                if table not in self._tables(connection):
+                    return [], 0
+                total = connection.execute(
+                    f"SELECT COUNT(*) FROM {table} {clause}", params).fetchone()[0]
+                rows = connection.execute(
+                    f"SELECT rowid AS rid, {columns} FROM {table} {clause} "
+                    f"ORDER BY rowid {direction} LIMIT ? OFFSET ?",
+                    [*params, limit, offset]).fetchall()
+        except sqlite3.Error as exc:
+            raise RunNotReadable(f"Could not read {table}: {exc}") from exc
+        return rows, int(total)
+
+    def _envelope(self, *, rows: list[dict[str, Any]], total: int, limit: int,
+                  offset: int, **extra: Any) -> dict[str, Any]:
+        limit = max(1, min(int(limit), MAX_PAGE))
+        offset = max(0, int(offset))
+        return {
+            "sim_id": self.sim_dir.name,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "count": len(rows),
+            "has_more": offset + len(rows) < total,
+            "next_offset": offset + len(rows) if offset + len(rows) < total else None,
+            **extra,
+        }
+
+    def actions(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        order: str = "newest",
+        agent: int | None = None,
+        round_index: int | None = None,
+        action_types: Sequence[str] = (),
+        include_engine: bool = False,
+    ) -> dict[str, Any]:
+        """Agent actions from OASIS's trace table, filtered and paged.
+
+        Engine bookkeeping is excluded unless asked for: the trace records
+        sign-ups alongside decisions, and they are not things an agent chose.
+        """
+        where: list[str] = []
+        params: list[Any] = []
+        if not include_engine:
+            engine = sorted(ENGINE_ACTIONS)
+            where.append(f"LOWER(action) NOT IN ({','.join('?' * len(engine))})")
+            params.extend(engine)
+        if agent is not None:
+            where.append("user_id = ?")
+            params.append(int(agent))
+        window = self._round_range("trace", round_index)
+        if window:
+            where.append("rowid > ? AND rowid <= ?")
+            params.extend(window)
+        wanted = [a.strip().lower() for a in action_types if a.strip()]
+        if wanted:
+            where.append(f"action IN ({','.join('?' * len(wanted))})")
+            params.extend(wanted)
+
+        self.ensure_indexes()
+        rows, total = self._page(
+            table="trace", columns="user_id, created_at, action, info",
+            where=where, params=params, limit=limit, offset=offset, order=order)
+
+        identities = self.identities()
+        bounds = self._round_bounds("trace")
+        items = [{
+            "user_id": int(row["user_id"]),
+            "username": _identity_field(identities, row["user_id"], "username"),
+            "name": _identity_field(identities, row["user_id"], "name"),
+            "population": _identity_field(identities, row["user_id"], "population",
+                                          default=True),
+            "action": row["action"],
+            "round": self._round_of(int(row["rid"]), bounds),
+            "created_at": row["created_at"],
+            "info": _maybe_json(row["info"]),
+        } for row in rows]
+        return self._envelope(rows=items, total=total, limit=limit, offset=offset,
+                              order=order, include_engine=include_engine,
+                              actions=items)
+
+    def posts(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        order: str = "newest",
+        agent: int | None = None,
+        round_index: int | None = None,
+        min_engagement: int = 0,
+        population_only: bool = False,
+    ) -> dict[str, Any]:
+        """Posts, with who wrote them, which round, and what they drew."""
+        where: list[str] = []
+        params: list[Any] = []
+        if agent is not None:
+            where.append("user_id = ?")
+            params.append(int(agent))
+        window = self._round_range("post", round_index)
+        if window:
+            where.append("rowid > ? AND rowid <= ?")
+            params.extend(window)
+        if min_engagement > 0:
+            where.append("(COALESCE(num_likes,0) + COALESCE(num_dislikes,0) "
+                         "+ COALESCE(num_shares,0)) >= ?")
+            params.append(int(min_engagement))
+
+        identities = self.identities()
+        if population_only:
+            ids = [i for i, who in identities.items() if who.population]
+            if not ids:
+                return self._envelope(rows=[], total=0, limit=limit, offset=offset,
+                                      order=order, posts=[])
+            where.append(f"user_id IN ({','.join('?' * len(ids))})")
+            params.extend(ids)
+
+        self.ensure_indexes()
+        rows, total = self._page(
+            table="post",
+            columns=("post_id, user_id, original_post_id, content, quote_content, "
+                     "created_at, num_likes, num_dislikes, num_shares"),
+            where=where, params=params, limit=limit, offset=offset, order=order)
+
+        comment_counts = self._comment_counts([int(r["post_id"]) for r in rows])
+        bounds = self._round_bounds("post")
+        items = []
+        for row in rows:
+            original = row["original_post_id"]
+            items.append({
+                "post_id": int(row["post_id"]),
+                "user_id": int(row["user_id"]),
+                "username": _identity_field(identities, row["user_id"], "username"),
+                "name": _identity_field(identities, row["user_id"], "name"),
+                "population": _identity_field(identities, row["user_id"], "population",
+                                              default=True),
+                "content": row["content"] or "",
+                "quote_content": row["quote_content"],
+                "original_post_id": int(original) if original is not None else None,
+                "kind": _post_kind(original, row["quote_content"]),
+                "round": self._round_of(int(row["rid"]), bounds),
+                "created_at": row["created_at"],
+                "likes": int(row["num_likes"] or 0),
+                "dislikes": int(row["num_dislikes"] or 0),
+                "reposts": int(row["num_shares"] or 0),
+                "comments": comment_counts.get(int(row["post_id"]), 0),
+            })
+            items[-1]["engagement"] = (items[-1]["likes"] + items[-1]["dislikes"]
+                                       + items[-1]["reposts"] + items[-1]["comments"])
+        return self._envelope(rows=items, total=total, limit=limit, offset=offset,
+                              order=order, posts=items)
+
+    def comments(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        order: str = "newest",
+        post_id: int | None = None,
+        agent: int | None = None,
+        round_index: int | None = None,
+    ) -> dict[str, Any]:
+        """Comments, optionally those on one post."""
+        where: list[str] = []
+        params: list[Any] = []
+        if post_id is not None:
+            where.append("post_id = ?")
+            params.append(int(post_id))
+        if agent is not None:
+            where.append("user_id = ?")
+            params.append(int(agent))
+        window = self._round_range("comment", round_index)
+        if window:
+            where.append("rowid > ? AND rowid <= ?")
+            params.extend(window)
+
+        self.ensure_indexes()
+        rows, total = self._page(
+            table="comment",
+            columns=("comment_id, post_id, user_id, content, created_at, "
+                     "num_likes, num_dislikes"),
+            where=where, params=params, limit=limit, offset=offset, order=order)
+
+        identities = self.identities()
+        bounds = self._round_bounds("comment")
+        items = [{
+            "comment_id": int(row["comment_id"]),
+            "post_id": int(row["post_id"]) if row["post_id"] is not None else None,
+            "user_id": int(row["user_id"]),
+            "username": _identity_field(identities, row["user_id"], "username"),
+            "name": _identity_field(identities, row["user_id"], "name"),
+            "population": _identity_field(identities, row["user_id"], "population",
+                                          default=True),
+            "content": row["content"] or "",
+            "round": self._round_of(int(row["rid"]), bounds),
+            "created_at": row["created_at"],
+            "likes": int(row["num_likes"] or 0),
+            "dislikes": int(row["num_dislikes"] or 0),
+        } for row in rows]
+        return self._envelope(rows=items, total=total, limit=limit, offset=offset,
+                              order=order, post_id=post_id, comments=items)
+
+    def _comment_counts(self, post_ids: Sequence[int]) -> dict[int, int]:
+        """Reply counts for one page of posts, in a single query."""
+        if not post_ids:
+            return {}
+        try:
+            with self._connect() as connection:
+                if "comment" not in self._tables(connection):
+                    return {}
+                placeholders = ",".join("?" * len(post_ids))
+                return {int(row[0]): int(row[1]) for row in connection.execute(
+                    f"SELECT post_id, COUNT(*) FROM comment "
+                    f"WHERE post_id IN ({placeholders}) GROUP BY post_id",
+                    list(post_ids))}
+        except sqlite3.Error:
+            return {}
+
     # -- round attribution --------------------------------------------------
 
     def _round_bounds(self, table: str) -> list[tuple[int, int, int]]:
@@ -452,6 +721,19 @@ class RunReader:
             if lower < rowid <= upper:
                 return round_index
         return None
+
+
+def _identity_field(identities: dict[int, Any], user_id: Any, field: str,
+                    default: Any = "") -> Any:
+    identity = identities.get(int(user_id)) if user_id is not None else None
+    return getattr(identity, field, default) if identity else default
+
+
+def _post_kind(original_post_id: Any, quote_content: Any) -> str:
+    """Original, repost or quote — OASIS encodes this in two nullable columns."""
+    if original_post_id is None:
+        return "original"
+    return "quote" if quote_content else "repost"
 
 
 def _maybe_json(value: Any) -> Any:

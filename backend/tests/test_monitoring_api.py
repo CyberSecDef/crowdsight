@@ -585,3 +585,258 @@ def test_nonsense_pagination_is_refused(client, query):
 def test_an_unknown_simulation_is_a_404_everywhere(client, suffix):
     response = client.get(f"/api/simulation/sim-20260101-000000-999999/{suffix}")
     assert response.status_code == 404
+
+
+# ==========================================================================
+# Phase 7 Step 2 — content access
+#
+# The spec asks for sane page limits because a large run holds tens of
+# thousands of rows, so the boundaries get more attention than the happy path:
+# a cap the caller cannot raise, an offset past the end that is empty rather
+# than an error, and filters that compose instead of overriding one another.
+# ==========================================================================
+
+
+def test_ENGINE_BOOKKEEPING_IS_NOT_AGENT_ACTIVITY(reader, populated):
+    """A three-hundred agent run opens with three hundred sign-ups.
+
+    Found by reading a real run: the trace records registration alongside
+    decisions, and `sign_up` was the oldest entry in the feed.
+    """
+    with sqlite3.connect(populated / "simulation.db") as db:
+        for user_id in range(4):
+            db.execute("INSERT INTO trace (user_id, created_at, action, info)"
+                       " VALUES (?, ?, 'sign_up', ?)",
+                       (user_id, f"s{user_id}", "{}"))
+
+    assert "sign_up" not in {a["action"] for a in reader.actions()["actions"]}
+    assert reader.actions()["total"] == 6, "the six real decisions"
+
+    everything = reader.actions(include_engine=True)
+    assert everything["total"] == 10
+    assert "sign_up" in {a["action"] for a in everything["actions"]}
+
+
+def test_the_recent_log_also_excludes_engine_bookkeeping(reader, populated):
+    with sqlite3.connect(populated / "simulation.db") as db:
+        db.execute("INSERT INTO trace (user_id, created_at, action, info)"
+                   " VALUES (0, 'z', 'sign_up', '{}')")
+    assert "sign_up" not in {a["action"] for a in reader.recent_actions()}
+
+
+def test_actions_are_paged_with_a_total(reader):
+    page = reader.actions(limit=2, offset=0)
+    assert page["count"] == 2
+    assert page["total"] == 6
+    assert page["has_more"] is True
+    assert page["next_offset"] == 2
+
+
+def test_paging_through_actions_visits_each_row_once(reader):
+    seen = []
+    offset = 0
+    while True:
+        page = reader.actions(limit=2, offset=offset)
+        seen.extend(a["created_at"] for a in page["actions"])
+        if not page["has_more"]:
+            break
+        offset = page["next_offset"]
+    assert len(seen) == len(set(seen)) == 6
+
+
+def test_THE_PAGE_LIMIT_CANNOT_BE_RAISED_BY_A_CALLER(reader):
+    """Otherwise limit=999999 is a way to ask for one enormous response."""
+    from app.services.run_reader import MAX_PAGE
+
+    assert reader.actions(limit=10_000)["limit"] == MAX_PAGE
+    assert reader.posts(limit=10_000)["limit"] == MAX_PAGE
+    assert reader.comments(limit=10_000)["limit"] == MAX_PAGE
+
+
+def test_an_offset_past_the_end_is_empty_not_an_error(reader):
+    page = reader.actions(offset=500)
+    assert page["actions"] == []
+    assert page["has_more"] is False
+    assert page["next_offset"] is None
+
+
+def test_actions_order_both_ways(reader):
+    newest = reader.actions(order="newest")["actions"]
+    oldest = reader.actions(order="oldest")["actions"]
+    assert newest[0]["action"] == "follow"
+    assert oldest[0]["action"] == "create_post"
+    assert [a["created_at"] for a in newest] == list(
+        reversed([a["created_at"] for a in oldest]))
+
+
+def test_actions_filter_by_agent(reader):
+    page = reader.actions(agent=2)
+    assert page["total"] == 3
+    assert {a["user_id"] for a in page["actions"]} == {2}
+
+
+def test_actions_filter_by_round(reader):
+    assert [a["action"] for a in reader.actions(round_index=0)["actions"]] == [
+        "create_post"]
+    assert reader.actions(round_index=1)["total"] == 3
+
+
+def test_actions_filter_by_type(reader):
+    page = reader.actions(action_types=["like_post", "follow"])
+    assert page["total"] == 2
+    assert {a["action"] for a in page["actions"]} == {"like_post", "follow"}
+
+
+def test_FILTERS_COMPOSE_RATHER_THAN_OVERRIDE(reader):
+    page = reader.actions(agent=2, round_index=1)
+    assert page["total"] == 2, "agent 2 acted twice in round one"
+    assert all(a["user_id"] == 2 and a["round"] == 1 for a in page["actions"])
+
+    narrower = reader.actions(agent=2, round_index=1, action_types=["like_post"])
+    assert narrower["total"] == 1
+
+
+def test_a_round_that_never_ran_returns_nothing(reader):
+    """Not everything, which is what a missing filter would return."""
+    assert reader.actions(round_index=99)["total"] == 0
+
+
+def test_posts_carry_their_author_and_round(reader):
+    posts = reader.posts(order="oldest")["posts"]
+    assert posts[0]["username"] == "riverbend_wire"
+    assert posts[0]["round"] == 0
+    assert posts[1]["username"] == "dawn_mercer"
+    assert posts[1]["round"] == 1
+
+
+def test_posts_report_the_engagement_they_drew(reader):
+    seed = reader.posts(order="oldest")["posts"][0]
+    assert seed["likes"] == 2
+    assert seed["reposts"] == 1
+    assert seed["comments"] == 0
+    assert seed["engagement"] == 3
+
+
+def test_a_posts_reply_count_comes_from_the_comments(reader):
+    first = [p for p in reader.posts()["posts"] if p["user_id"] == 0][0]
+    assert first["comments"] == 1
+    assert first["engagement"] == 4, "three likes and a reply"
+
+
+def test_posts_are_classified_by_kind(reader):
+    assert {p["kind"] for p in reader.posts()["posts"]} == {"original"}
+
+
+def test_posts_filter_by_agent_and_round(reader):
+    assert reader.posts(agent=2)["total"] == 1
+    assert reader.posts(round_index=2)["total"] == 1
+    assert reader.posts(agent=0, round_index=1)["total"] == 1
+    assert reader.posts(agent=0, round_index=2)["total"] == 0
+
+
+def test_posts_filter_by_engagement(reader):
+    assert reader.posts(min_engagement=3)["total"] == 2
+    assert reader.posts(min_engagement=100)["total"] == 0
+
+
+def test_the_broadcasters_posts_can_be_excluded(reader):
+    """Its announcement is the loudest thing in most runs."""
+    everyone = reader.posts()["total"]
+    public = reader.posts(population_only=True)
+    assert public["total"] == everyone - 1
+    assert all(p["population"] for p in public["posts"])
+
+
+def test_comments_can_be_filtered_to_one_post(reader):
+    target = [p for p in reader.posts()["posts"] if p["user_id"] == 0][0]
+    page = reader.comments(post_id=target["post_id"])
+    assert page["total"] == 1
+    assert page["comments"][0]["content"] == "I disagree."
+    assert page["post_id"] == target["post_id"]
+
+
+def test_comments_on_a_post_with_no_replies(reader):
+    assert reader.comments(post_id=999)["total"] == 0
+
+
+def test_comments_carry_their_author_and_round(reader):
+    comment = reader.comments()["comments"][0]
+    assert comment["username"] == "jane_doe"
+    assert comment["round"] == 1
+
+
+def test_content_on_a_run_that_never_started(sim_dir):
+    empty = RunReader(sim_dir)
+    with pytest.raises(RunNotReadable):
+        empty.actions()
+
+
+# -- over HTTP -------------------------------------------------------------
+
+
+def test_actions_over_http(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/actions?limit=3").get_json()
+    assert body["count"] == 3
+    assert body["total"] == 6
+    assert body["actions"][0]["action"] == "follow"
+
+
+def test_action_filters_over_http(client):
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/actions?agent=2&round=1").get_json()
+    assert body["total"] == 2
+
+
+def test_engine_actions_can_be_asked_for_over_http(client):
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/actions?include_engine=true").get_json()
+    assert body["include_engine"] is True
+
+
+def test_the_action_type_filter_accepts_a_list(client):
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/actions?action=like_post,follow").get_json()
+    assert body["total"] == 2
+
+
+def test_posts_over_http(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/posts").get_json()
+    assert body["total"] == 3, "the seed plus one post each from two agents"
+    assert all("engagement" in p for p in body["posts"])
+
+
+def test_comments_over_http(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/comments").get_json()
+    assert body["total"] == 1
+
+
+def test_THE_PLATFORM_FILTER_IS_VALIDATED_NOT_IGNORED(client):
+    """A run has one platform; filtering by another is a caller bug."""
+    good = client.get(f"/api/simulation/{client.sim_id}/posts?platform=twitter")
+    assert good.status_code == 200
+
+    bad = client.get(f"/api/simulation/{client.sim_id}/posts?platform=reddit")
+    assert bad.status_code == 400
+    assert "twitter" in bad.get_json()["error"]
+
+
+@pytest.mark.parametrize("query", ["limit=x", "offset=y", "limit=0", "offset=-1",
+                                   "order=sideways", "agent=nope", "round=nope"])
+def test_nonsense_paging_and_filters_are_refused(client, query):
+    response = client.get(f"/api/simulation/{client.sim_id}/actions?{query}")
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("endpoint", ["actions", "posts", "comments"])
+def test_the_cap_is_enforced_over_http(client, endpoint):
+    from app.services.run_reader import MAX_PAGE
+
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/{endpoint}?limit=99999").get_json()
+    assert body["limit"] == MAX_PAGE
+
+
+@pytest.mark.parametrize("endpoint", ["actions", "posts", "comments"])
+def test_content_endpoints_404_on_an_unknown_simulation(client, endpoint):
+    response = client.get(f"/api/simulation/sim-20260101-000000-999999/{endpoint}")
+    assert response.status_code == 404

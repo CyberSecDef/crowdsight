@@ -718,3 +718,132 @@ def agent_stats(sim_id: str):
         ))
     except RunNotReadable as exc:
         return _error(str(exc), 409)
+
+
+# ==========================================================================
+# Phase 7 Step 2 — content access
+#
+# Paginated, filterable reads of what a run produced. Page sizes are capped in
+# the reader rather than trusted from the query string: a large run holds tens
+# of thousands of rows and `limit=999999` would otherwise be a way to ask the
+# API to build one enormous response.
+# ==========================================================================
+
+
+def _paging() -> tuple[int, int, str]:
+    """limit, offset and order, from the query string."""
+    try:
+        limit = int(request.args.get("limit") or 50)
+        offset = int(request.args.get("offset") or 0)
+    except ValueError:
+        raise ValueError("limit and offset must be whole numbers") from None
+    if limit < 1 or offset < 0:
+        raise ValueError("limit must be at least 1 and offset at least 0")
+    order = str(request.args.get("order") or "newest").lower()
+    if order not in {"newest", "oldest"}:
+        raise ValueError("order must be 'newest' or 'oldest'")
+    return limit, offset, order
+
+
+def _optional_int_arg(name: str) -> int | None:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number") from None
+
+
+def _check_platform(sim_id: str) -> None:
+    """A run has exactly one platform, so filtering by another is a caller bug.
+
+    The spec lists `platform` among the filters, but OASIS's trace table has no
+    platform column and a simulation is configured with a single one. Silently
+    ignoring the parameter would hand back a full result set to a caller who
+    believes they filtered it, so it is validated instead.
+    """
+    requested = str(request.args.get("platform") or "").strip().lower()
+    if not requested:
+        return
+    runtime = get_runtime()
+    actual = runtime.sims.load_meta(sim_id).platform
+    if requested != actual:
+        raise ValueError(
+            f"This simulation runs on {actual!r}, not {requested!r}; every action "
+            f"in a run is on the same platform")
+
+
+@control.get("/<sim_id>/actions")
+def actions(sim_id: str):
+    """Agent actions, filtered by agent, round or action type."""
+    from app.services.run_reader import RunNotReadable
+
+    reader = _reader(sim_id)
+    try:
+        limit, offset, order = _paging()
+        _check_platform(sim_id)
+        agent = _optional_int_arg("agent")
+        round_index = _optional_int_arg("round")
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+    raw = request.args.get("action") or ""
+    action_types = [part for part in raw.replace(" ", ",").split(",") if part]
+
+    try:
+        return jsonify(reader.actions(
+            limit=limit, offset=offset, order=order, agent=agent,
+            round_index=round_index, action_types=action_types,
+            include_engine=request.args.get("include_engine") in
+            {"1", "true", "yes"}))
+    except RunNotReadable as exc:
+        return _error(str(exc), 409)
+
+
+@control.get("/<sim_id>/posts")
+def posts(sim_id: str):
+    """Posts, with author, round and the engagement each drew."""
+    from app.services.run_reader import RunNotReadable
+
+    reader = _reader(sim_id)
+    try:
+        limit, offset, order = _paging()
+        _check_platform(sim_id)
+        agent = _optional_int_arg("agent")
+        round_index = _optional_int_arg("round")
+        min_engagement = _optional_int_arg("min_engagement") or 0
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+    try:
+        return jsonify(reader.posts(
+            limit=limit, offset=offset, order=order, agent=agent,
+            round_index=round_index, min_engagement=min_engagement,
+            population_only=request.args.get("population_only") in
+            {"1", "true", "yes"}))
+    except RunNotReadable as exc:
+        return _error(str(exc), 409)
+
+
+@control.get("/<sim_id>/comments")
+def comments(sim_id: str):
+    """Comments, optionally only those replying to one post."""
+    from app.services.run_reader import RunNotReadable
+
+    reader = _reader(sim_id)
+    try:
+        limit, offset, order = _paging()
+        _check_platform(sim_id)
+        post_id = _optional_int_arg("post_id")
+        agent = _optional_int_arg("agent")
+        round_index = _optional_int_arg("round")
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+    try:
+        return jsonify(reader.comments(
+            limit=limit, offset=offset, order=order, post_id=post_id,
+            agent=agent, round_index=round_index))
+    except RunNotReadable as exc:
+        return _error(str(exc), 409)
