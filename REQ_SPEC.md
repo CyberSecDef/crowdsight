@@ -778,8 +778,20 @@ Implemented in `backend/app/services/report_agent.py`, with sentiment scoring in
 
 **Tool results are sanitised before they reach the prompt.** Truncated to a bound rather than silently cut, and any fence that could close the data block is defanged — post text is written by agents, and an agent that has been told to write "ignore your instructions" must not have that read as one.
 
-**Step 2: Grounding and citation**
+**Step 2: Grounding and citation** ✅
 Every claim in the report must cite the underlying data — specific post IDs, agent IDs, round numbers. A simulation report that cannot be traced back to simulated evidence is indistinguishable from the model's prior assumptions, which defeats the purpose.
+
+Implemented in `backend/app/services/report_grounding.py` and wired into the agent so a report is verified *before* it is returned — a caller that forgot to check would otherwise publish claims the run cannot support, which is the one failure this step exists to prevent. Verified against a real run: 10/10 checks, with all 21 of the live model's citations resolving, and a deliberately fabricated report correctly pruned.
+
+**Three failures are held apart, because conflating them hides what matters.** A claim that cites nothing is *unsupported* — the model did not show its working, but nothing about it is false, so it is kept and recorded. A claim citing a post that does not exist is *fabricated evidence*, which is worse, and it is dropped. Deleting it silently would be its own dishonesty, so every dropped claim stays visible in the verification record with the reason, and the report's own caveats say how many were removed. A reader is owed the knowledge that the model asserted something it could not support.
+
+**One bad reference drops the whole claim.** A finding resting partly on invented evidence is not partly true.
+
+**Prose is checked, because it is the part people read.** A citation object can be validated by construction; an executive summary cannot, and nothing stops a model writing "post 47 drove the backlash" there. References in free text — `post 12`, `agent 4`, `round 3`, `@dawn_mercer` — are extracted and resolved, and unresolvable ones are flagged in the caveats. The matching is deliberately conservative: reading every number as a citation would turn "four-storey development" and "twenty-one days" into noise that drowns the real findings. Prose is flagged rather than rewritten, since editing the model's words would be a different kind of dishonesty.
+
+**A run with no data verifies nothing rather than everything.** Absent evidence must not read as evidence of absence, so an empty run reports that it could check nothing instead of passing every claim.
+
+**Tests:** `tests/test_report_grounding.py` — 41 tests, mostly adversarial: reports that cite posts, agents and rounds which do not exist, and assertions that those claims do not survive.
 
 **Step 3: Report API and persistence**
 Build `backend/app/api/report.py`: `POST /api/report/generate` (async, returns task ID), `GET /api/report/status/<task_id>`, `GET /api/report/<report_id>`, `GET /api/report/<report_id>/export` (Markdown and HTML). Persist reports under `data/reports/`.

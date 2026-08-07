@@ -41,8 +41,9 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from app.config import Config, get_config
+from app.services.report_grounding import Grounding, check_report
 from app.services.run_reader import RunReader
-from app.services.sentiment import SentimentScorer, round_trajectory
+from app.services.sentiment import round_trajectory
 from app.utils.llm_client import LLMClient, LLMJSONError
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,9 @@ class Report(BaseModel):
     caveats: list[str] = Field(default_factory=list)
     #: Filled in by the agent, not the model.
     evidence: dict[str, Any] = Field(default_factory=dict)
+    #: The verification record from Step 2. Published with the report rather
+    #: than beside it, so a reader cannot see the claims without the check.
+    grounding: dict[str, Any] = Field(default_factory=dict)
     tool_calls_used: int = 0
     reflection_rounds_used: int = 0
 
@@ -494,10 +498,39 @@ class ReportAgent:
             "tool_calls": tools.calls,
         }
         report.caveats = list(report.caveats) + _scale_caveats(bundle, timeline)
+
+        # Verified before it is returned, never after. A caller that forgot to
+        # check would otherwise publish claims the run cannot support, which is
+        # the one failure this phase exists to prevent.
+        say("verifying", 0.95)
+        report, grounding = check_report(report, sim_dir)
+        report.grounding = grounding.model_dump()
+        report.caveats = list(report.caveats) + _grounding_caveats(grounding)
         return report
 
     async def aclose(self) -> None:
         await self.llm.aclose()
+
+
+def _grounding_caveats(grounding: Grounding) -> list[str]:
+    """Say in the report what verification found. Silence would hide it."""
+    out = []
+    if grounding.dropped:
+        out.append(
+            f"{len(grounding.dropped)} claim(s) were removed because they cited "
+            f"posts, agents or rounds that do not exist in this run. They are "
+            f"listed in the verification record.")
+    if grounding.uncited_claims:
+        out.append(
+            f"{len(grounding.uncited_claims)} finding(s) cite no evidence and "
+            f"rest on the analyst's reading rather than on identified data.")
+    if grounding.prose_unresolved:
+        where = ", ".join(sorted({r.where for r in grounding.prose_unresolved}))
+        out.append(
+            f"The {where} refer(s) to {len(grounding.prose_unresolved)} post, "
+            f"agent or round that does not exist in this run; treat those "
+            f"sentences with suspicion.")
+    return out
 
 
 def _scale_caveats(bundle: dict[str, Any], timeline: list[dict[str, Any]]) -> list[str]:
