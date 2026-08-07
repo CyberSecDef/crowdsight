@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test'
 
+import { launchableSimulation } from './support.js'
+
 /**
  * Stage 2 — the population, in a real browser.
  *
@@ -19,26 +21,14 @@ function watch(page) {
   return problems
 }
 
-/** A simulation that is still editable — a finished one has a frozen population. */
-async function findDraft(request) {
-  const response = await request.get('/api/simulation/list?limit=50')
-  const { simulations } = await response.json()
-  for (const sim of simulations || []) {
-    if (sim.state !== 'draft' || !sim.prepared) continue
-    const profiles = await request.get(`/api/simulation/${sim.sim_id}/profiles`)
-    if (profiles.ok()) {
-      const { count } = await profiles.json()
-      if (count >= 2) return sim.sim_id
-    }
-  }
-  return null
-}
-
 test.describe('the population', () => {
   let simId
 
   test.beforeAll(async ({ request }) => {
-    simId = await findDraft(request)
+    // A finished run has a frozen population, so this needs an editable one —
+    // and the live run test in simulation.spec.js consumes exactly that.
+    test.setTimeout(10 * 60 * 1000)
+    simId = await launchableSimulation(request)
   })
 
   test.beforeEach(async ({ page }) => {
@@ -133,7 +123,10 @@ test.describe('staged changes', () => {
   const uniqueOccupation = () => `lighthouse keeper ${Date.now()}`
 
   test.beforeAll(async ({ request }) => {
-    simId = await findDraft(request)
+    // A finished run has a frozen population, so this needs an editable one —
+    // and the live run test in simulation.spec.js consumes exactly that.
+    test.setTimeout(10 * 60 * 1000)
+    simId = await launchableSimulation(request)
   })
 
   test.beforeEach(async ({ page }) => {

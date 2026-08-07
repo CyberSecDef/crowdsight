@@ -149,6 +149,24 @@ check "THE UI ACCEPTS EXACTLY WHAT THE SERVER ACCEPTS" $? "server=$server_ext ui
 [ "$server_max" = "$ui_max" ]
 check "the upload size cap matches the server's" $? "server=$server_max ui=$ui_max"
 
+# --- the per-platform action sets the config editor offers ------------------
+# Twitter has no comments and Reddit has no reposts. A stale mirror offers a
+# checkbox the server refuses the whole config for.
+for platform in twitter reddit; do
+    server=$(docker compose exec -T backend python -c "
+from app.services.action_space import PLATFORM_ACTIONS
+print(','.join(sorted(PLATFORM_ACTIONS['$platform'])))
+" 2>/dev/null | tr -d '\r')
+    ui=$(node -e "
+const m = require('fs').readFileSync('frontend/src/api/scenario.js','utf8')
+const name = '$platform' === 'twitter' ? 'TWITTER_ACTIONS' : 'REDDIT_ACTIONS'
+const body = m.split('export const ' + name + ' = [')[1].split(']')[0]
+console.log(body.split(',').map(s=>s.trim().replace(/'/g,'')).filter(Boolean).sort().join(','))
+")
+    [ "$server" = "$ui" ]
+    check "the $platform action set matches the server's" $? "server=$server"
+done
+
 # --- the shapes the views actually read -------------------------------------
 # A field the UI reads and the API does not send renders as "unknown" or "—".
 # That looks broken rather than wrong, and no HTTP-level check catches it, so

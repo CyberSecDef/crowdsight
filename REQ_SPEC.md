@@ -913,8 +913,30 @@ Profile review: browse generated agents, inspect personas, see the named-vs-synt
 
 **A test-isolation lesson worth recording.** These browser tests write to a real simulation, and two of them filled a fixed occupation string. The first run persisted it, so the second staged no change at all — and the failure read as "the UI stopped detecting edits" rather than "the test asserted its own leftovers". Tests that mutate shared state must not depend on the starting value.
 
-**Step 4: Stage 3 — simulation**
+**Step 4: Stage 3 — simulation** ✅
 Config review and edit, platform selection, round count, launch controls, and a live run view — progress bar, round counter, streaming action feed, per-agent activity.
+
+One view holding both the scenario and the run, because they are the same simulation at different moments and a run takes hours — coming back to a live run and wanting to check what was configured is the normal case. Verified against the live sealed stack: **38 HTTP checks, 146 unit tests, 59 browser tests**, including a run launched from the UI and watched through to completion.
+
+**Polling is tiered, because four endpoints move at three speeds.** `run-status` is small and drives the bar, so it ticks every 2s. The action feed only ever grows, so it is walked forward from the last offset rather than re-read — re-fetching a feed of thousands of actions every few seconds to learn one new row is a lot of work for nothing. `timeline` and `agent-stats` do not change within a round, so they refresh when the round counter moves rather than on a clock.
+
+**`prepared` does not mean what it looks like.** On a simulation summary it means "has a scenario", not "has a population" — and a fork is `prepared` the moment it is created, with no agents at all. Using it to enable the Start button enabled it on every fork, which the server then refused. The population is now asked about separately, and the two refusals say different things.
+
+**A scheduled event in the final round is valid.** The engine keeps events where `round <= rounds`; the first version of the client-side check used `>=`, which rejected configs the generator itself produces — the fork screen could not be saved at all, and a disabled button with a plausible-looking objection is a poor way to discover an off-by-one.
+
+**Switching platform prunes the action set.** Twitter has no comments and Reddit has no reposts, so carrying a selection across a switch sends actions the new platform has never heard of. The server refuses the whole config, correctly, with a message about an action the operator never consciously chose — so the switch drops them and says which.
+
+**Three bugs of my own, all found in the browser.**
+
+A run that has not started has no database, and the reader says so with a 409. The monitor treated that as a fault, so the scenario screen for an unlaunched run carried an error banner about a run nobody had started.
+
+The fork notice was wiped by the navigation it triggers: the view set the message, pushed the new route, and the `simId` watcher cleared it as part of switching. The one message explaining why the id changed was destroyed by the change. **This is the second instance of the same shape** — Step 3's "Saved" confirmation was cleared by the reload that followed it — and both times the operation worked and only the explanation vanished.
+
+The stage indicator stopped unlocking stages 4 and 5, because the rewritten view never wrote the run's state back to the workflow store. Nothing else sets it, so forgetting it silently locked the last two stages for the whole session.
+
+**And a UX bug the flakiness led to.** The "Show the scenario" toggle was clickable while `load()` was still running, and `load()` then decided which side to open on — silently undoing the click. It is gated on `!loading` now.
+
+**Test fixtures are now made, not scavenged.** Three suites had come to depend on leftover state, and each time the failure blamed the product: a parked task outliving its graph, a graph that was parked *and* already built, and `prepared` meaning the wrong thing. The live run test also consumes its simulation by running it to completion, so a scavenging suite would pass once and then skip itself for ever — reporting "nothing to test against" about a stack that works. `tests/e2e/support.js` provisions what it needs.
 
 **Step 5: Stage 4 — report**
 Rendered report with charts (sentiment over rounds, action distribution, influence graph), citation links that jump to the underlying post, and export buttons.

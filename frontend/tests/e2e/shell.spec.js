@@ -121,9 +121,14 @@ test.describe('the fields the views read', () => {
   })
 
   test('a run view reads the run-status shape it expects', async ({ page }) => {
-    const response = await page.request.get('/api/simulation/list?limit=1')
+    // Not simply the newest: forks are drafts that never ran, so the first
+    // entry in the list often has no run data at all.
+    const response = await page.request.get('/api/simulation/list?limit=50')
     const { simulations } = await response.json()
-    test.skip(!simulations?.length, 'no runs on disk')
+    const ran = (simulations || []).filter((s) => s.started_at)
+    test.skip(!ran.length, 'no run with data on disk')
+    simulations.length = 0
+    simulations.push(...ran)
 
     const problems = watch(page)
     await page.goto(`/simulations/${simulations[0].sim_id}/run`)
@@ -134,7 +139,7 @@ test.describe('the fields the views read', () => {
     await expect(tag).toBeVisible()
     await expect(tag).not.toHaveText('unknown')
     // total_rounds, not rounds: an em dash here means the field name is wrong.
-    await expect(page.getByText(/round \d+ of \d+/)).toBeVisible()
+    await expect(page.getByRole('heading', { name: /Round \d+ of \d+/ })).toBeVisible()
 
     expect(problems.pageErrors).toEqual([])
   })
