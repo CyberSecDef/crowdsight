@@ -709,8 +709,25 @@ All three implemented on `RunReader`. Verified against a real completed run: 13/
 
 Posts additionally report what they drew — likes, dislikes, reposts and reply count as a single `engagement` figure — and are classified `original`, `repost` or `quote`, which OASIS encodes across two nullable columns. `population_only=true` excludes the broadcaster's announcements, for the same reason as in Step 1.
 
-**Step 3: Agent interview**
+**Step 3: Agent interview** ✅
 Implement `POST /api/simulation/interview` (ask one agent a question mid-run, in character and with its accumulated memory), `POST /api/simulation/interview/batch`, `POST /api/simulation/interview/all`, and `POST /api/simulation/interview/history`. Interviews route through the IPC channel into the live simulation process. This is the feature that turns a simulation into an instrument you can probe — prioritise it.
+
+All four endpoints implemented. Verified against a live run: 14/14 checks, including an agent answering **mid-round in four seconds**, in character —
+*"I feel cautiously optimistic about the four-storey developments along the Eastgate corridor as they could potentially boost housing supply…"*
+
+**An interview observes; it does not intervene.** Reading OASIS's `perform_interview` settled the question that decides whether this is an instrument or a nudge: it builds the prompt from the agent's memory and calls the model directly, deliberately sidestepping `astep` so nothing is written back. Upstream's own comment says exactly that. Questioning an agent therefore does not change how it behaves afterwards — a property worth stating plainly, because the opposite is the reasonable assumption.
+
+**Interviews are already persisted by OASIS**, as an `interview` trace row carrying both prompt and response. So history needed no new storage, and is readable long after the process is gone — confirmed by reading a finished run's interviews back.
+
+**Interviews run immediately, alongside the round in progress.** An interactive probe that waits for a round boundary — minutes away under load — is not one. They share the GPU with the round and are bounded by their own concurrency limit inside the worker.
+
+**A finished run refuses rather than reconstructs.** The agents and their accumulated memory exist only inside the running process. Answering from a rebuilt persona would produce a response indistinguishable from a real one while having none of the memory that makes it worth having, so it is a `409` explaining where history still lives.
+
+**Bulk interviews are background tasks.** A single interview answers inline, because that is the interactive case; `batch` and `all` return a task id, since three hundred agents is three hundred completions and no HTTP request should be held open for that.
+
+**Two bugs the real run found.** An unknown agent id came back as `502 The simulation did not answer: ValueError`, which is indistinguishable from the worker having crashed — the worker raised, the IPC layer reported a transport failure, and the caller's mistake looked like ours. Agent ids are now resolved against the population file before dispatch, giving a `404` that names the valid range, and the broadcaster is excluded because a synthetic news account has no persona to interview. Separately, `limit: 0` in a JSON body was silently becoming 50: `0 or 50` is 50, so the range check never fired. The query-string endpoints were unaffected, since there `"0"` is a truthy string.
+
+**Tests:** `tests/test_interview.py` — 49 tests covering each property the spec names, with the two failure modes above given their own tests so they cannot come back.
 
 **Step 4: Environment health**
 Implement `POST /api/simulation/env-status` (is the environment alive and accepting commands) and `POST /api/simulation/close-env` (graceful shutdown with timeout).

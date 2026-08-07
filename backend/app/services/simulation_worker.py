@@ -149,9 +149,66 @@ async def run_simulation(
         logger.info("Stop requested for %s at round %d", sim_id, state.round)
         return {"accepted": True, "round": state.round}
 
+    async def on_interview(request: Any) -> dict[str, Any]:
+        """Ask one or more agents a question, in character.
+
+        Runs immediately, alongside whatever round is in progress. An interview
+        is an interactive probe: waiting for a round boundary, which under load
+        is minutes away, would defeat the point of having one.
+
+        OASIS's `perform_interview` reads the agent's memory and calls the model
+        directly rather than going through `astep`, so the agent's memory is not
+        written to and its later behaviour is unchanged. That is what makes this
+        an observation rather than an intervention -- and it is upstream's
+        deliberate design, not an accident we are relying on.
+        """
+        args = getattr(request, "args", {}) or {}
+        question = str(args.get("question") or "").strip()
+        if not question:
+            raise ValueError("An interview needs a question")
+
+        wanted = args.get("agents")
+        agents = _select_agents(runner, wanted)
+        if not agents:
+            raise ValueError(f"No such agent(s): {wanted!r}")
+
+        limit = int(args.get("concurrency") or 0) or max(1, concurrency or 4)
+        semaphore = asyncio.Semaphore(limit)
+
+        async def ask(agent_id: int, agent: Any) -> dict[str, Any]:
+            async with semaphore:
+                try:
+                    result = await agent.perform_interview(question)
+                    return {
+                        "user_id": agent_id,
+                        "username": getattr(agent.user_info, "user_name", "") or "",
+                        "question": question,
+                        "response": result.get("content", ""),
+                        "recorded": bool(result.get("success")),
+                    }
+                except Exception as exc:  # noqa: BLE001 - one answer, not the run
+                    logger.warning("Interview of agent %s failed: %s", agent_id, exc)
+                    return {
+                        "user_id": agent_id,
+                        "username": getattr(agent.user_info, "user_name", "") or "",
+                        "question": question,
+                        "response": "",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+
+        answers = await asyncio.gather(*(ask(i, a) for i, a in agents))
+        return {
+            "sim_id": sim_id,
+            "round": state.round,
+            "stage": state.stage,
+            "count": len(answers),
+            "answers": answers,
+        }
+
     server.handle("ping", on_ping)
     server.handle("status", on_status)
     server.handle("stop", on_stop)
+    server.handle("interview", on_interview)
 
     # SIGTERM is the manager escalating. Treat it as a stop request so the
     # round in flight still finishes rather than dying half-applied.
@@ -281,6 +338,24 @@ def _checkpoint(ledger: Any, summary: Any) -> None:
         skipped=summary.skipped, events_fired=summary.events_fired,
         action_counts=summary.action_counts, failures=summary.failures,
     ))
+
+
+def _select_agents(runner: Any, wanted: Any) -> list[tuple[int, Any]]:
+    """Which agents to interview.
+
+    ``None`` means the whole population -- deliberately not the broadcaster,
+    which is a synthetic news account with nothing to say about how it feels.
+    """
+    population = runner.population()
+    if wanted is None:
+        return population
+    if isinstance(wanted, (int, str)):
+        wanted = [wanted]
+    try:
+        ids = {int(value) for value in wanted}
+    except (TypeError, ValueError):
+        return []
+    return [(agent_id, agent) for agent_id, agent in population if agent_id in ids]
 
 
 def _record_outcome(store: Any, sim_id: str, *, failed: bool) -> None:

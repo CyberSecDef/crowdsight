@@ -847,3 +847,213 @@ def comments(sim_id: str):
             agent=agent, round_index=round_index))
     except RunNotReadable as exc:
         return _error(str(exc), 409)
+
+
+# ==========================================================================
+# Phase 7 Step 3 — agent interviews
+#
+# The one endpoint that asks a population *why*. A single interview answers
+# inline because it is an interactive probe; batch and all run as background
+# tasks, because three hundred agents is three hundred completions and no HTTP
+# request should be held open for that.
+# ==========================================================================
+
+
+def _interview_request() -> tuple[str, str, dict[str, Any]]:
+    """sim_id, question and the rest, from the body."""
+    payload = _body()
+    sim_id = _sim_id_from(payload)
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        raise ValueError("question is required")
+    return sim_id, question, payload
+
+
+@control.post("/interview")
+def interview():
+    """Ask one agent a question, in character and with its accumulated memory."""
+    from app.services.interview import (
+        InterviewError,
+        NoSuchAgent,
+        SimulationNotLive,
+        conduct,
+        interviewable,
+    )
+
+    runtime = get_runtime()
+    try:
+        sim_id, question, payload = _interview_request()
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    runtime.sims.load_meta(sim_id)
+
+    agent = payload.get("agent", payload.get("user_id"))
+    if agent is None:
+        return _error("agent is required; use /interview/all to ask everyone", 400)
+    try:
+        agents = [int(agent)]
+    except (TypeError, ValueError):
+        return _error("agent must be an agent id", 400)
+
+    # Checked here, not by the worker: an unknown id is a caller mistake and
+    # deserves a 404, not a round trip that comes back as a transport failure.
+    known = interviewable(runtime.sims.sim_dir(sim_id))
+    if agents[0] not in known:
+        return _error(
+            f"No interviewable agent {agents[0]} in this simulation "
+            f"(ids {min(known)}-{max(known)})" if known else
+            f"This simulation has no population to interview", 404)
+
+    try:
+        result = conduct(runtime.manager, sim_id, question, agents=agents)
+    except SimulationNotLive as exc:
+        return _error(str(exc), 409)
+    except InterviewError as exc:
+        return _error(str(exc), 502)
+
+    answers = result.get("answers") or []
+    if not answers:
+        return _error(f"No agent {agent} in this simulation", 404)
+    return jsonify({
+        "sim_id": sim_id,
+        "round": result.get("round"),
+        **answers[0],
+    })
+
+
+async def interview_job(
+    progress: TaskProgress,
+    *,
+    sim_id: str,
+    question: str,
+    agents: list[int] | None,
+) -> dict[str, Any]:
+    """Interview many agents in the background, reporting as answers arrive."""
+    import asyncio
+
+    from app.services.interview import conduct
+
+    runtime = get_runtime()
+    scope = "every agent" if agents is None else f"{len(agents)} agent(s)"
+    progress.update(stage="interview", progress=0.05,
+                    message=f"Asking {scope}: {question[:60]}")
+
+    # The worker answers them concurrently; this call blocks until they are all
+    # back, so it runs off the event loop to keep the runner responsive.
+    result = await asyncio.to_thread(
+        conduct, runtime.manager, sim_id, question, agents=agents)
+
+    answers = result.get("answers") or []
+    failed = [a for a in answers if a.get("error")]
+    progress.update(stage="interview", progress=1.0,
+                    message=f"{len(answers) - len(failed)} of {len(answers)} answered")
+    return {
+        "sim_id": sim_id,
+        "question": question,
+        "round": result.get("round"),
+        "count": len(answers),
+        "failed": len(failed),
+        "answers": answers,
+    }
+
+
+def _submit_interview(sim_id: str, question: str, agents: list[int] | None):
+    runtime = get_runtime()
+    task = runtime.tasks.create("simulation.interview")
+    runtime.runner.submit(task, lambda p: interview_job(
+        p, sim_id=sim_id, question=question, agents=agents))
+    return jsonify({
+        "sim_id": sim_id,
+        "task_id": task.id,
+        "status": TaskStatus.RUNNING,
+        "agents": "all" if agents is None else len(agents),
+        "poll": f"/api/simulation/prepare/status?task_id={task.id}",
+    }), 202
+
+
+@control.post("/interview/batch")
+def interview_batch():
+    """Ask several named agents the same question. Returns a task to poll."""
+    from app.services.interview import SimulationNotLive
+
+    runtime = get_runtime()
+    try:
+        sim_id, question, payload = _interview_request()
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    runtime.sims.load_meta(sim_id)
+
+    raw = payload.get("agents")
+    if not isinstance(raw, list) or not raw:
+        return _error("agents must be a non-empty list of agent ids", 400)
+    try:
+        agents = [int(value) for value in raw]
+    except (TypeError, ValueError):
+        return _error("agents must be a list of agent ids", 400)
+
+    from app.services.interview import interviewable
+
+    known = interviewable(runtime.sims.sim_dir(sim_id))
+    unknown = [value for value in agents if value not in known]
+    if unknown:
+        return _error(f"No interviewable agent(s) {unknown} in this simulation", 404)
+
+    if not runtime.manager.is_running(sim_id):
+        return _error(str(SimulationNotLive(
+            f"Simulation {sim_id} is not running; there is nobody to ask")), 409)
+    return _submit_interview(sim_id, question, agents)
+
+
+@control.post("/interview/all")
+def interview_all():
+    """Ask the whole population the same question. Returns a task to poll."""
+    from app.services.interview import SimulationNotLive
+
+    runtime = get_runtime()
+    try:
+        sim_id, question, _ = _interview_request()
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    runtime.sims.load_meta(sim_id)
+
+    if not runtime.manager.is_running(sim_id):
+        return _error(str(SimulationNotLive(
+            f"Simulation {sim_id} is not running; there is nobody to ask")), 409)
+    return _submit_interview(sim_id, question, None)
+
+
+@control.post("/interview/history")
+def interview_history():
+    """Interviews already conducted. Readable long after the run has ended."""
+    from app.services.interview import history
+
+    runtime = get_runtime()
+    payload = _body()
+    sim_id = _sim_id_from(payload)
+    runtime.sims.load_meta(sim_id)
+
+    # Explicit None checks, not `or`: a JSON body carries a real 0, and
+    # `0 or 50` silently becomes 50 rather than being refused as out of range.
+    raw_limit = payload.get("limit")
+    raw_offset = payload.get("offset")
+    try:
+        limit = 50 if raw_limit is None else int(raw_limit)
+        offset = 0 if raw_offset is None else int(raw_offset)
+    except (TypeError, ValueError):
+        return _error("limit and offset must be whole numbers", 400)
+    if limit < 1 or offset < 0:
+        return _error("limit must be at least 1 and offset at least 0", 400)
+
+    agent = payload.get("agent", payload.get("user_id"))
+    if agent is not None:
+        try:
+            agent = int(agent)
+        except (TypeError, ValueError):
+            return _error("agent must be an agent id", 400)
+
+    order = str(payload.get("order") or "newest").lower()
+    if order not in {"newest", "oldest"}:
+        return _error("order must be 'newest' or 'oldest'", 400)
+
+    return jsonify(history(runtime.sims.sim_dir(sim_id), agent=agent,
+                           limit=limit, offset=offset, order=order))
