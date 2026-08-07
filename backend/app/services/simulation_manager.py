@@ -129,6 +129,8 @@ class WorkerRecord:
     concurrency: int = 1
     spawned_at: float = 0.0
     socket: str = ""
+    #: True when this process picked up a run that had failed part-way.
+    resumed: bool = False
 
     def alive(self) -> bool:
         """True only when the recorded process is still the one we spawned.
@@ -263,10 +265,15 @@ class SimulationManager:
         meta = self.store.load_meta(sim_id)
         if self.is_running(sim_id):
             raise CapacityError(f"Simulation {sim_id} is already running")
-        if meta.state != SimulationState.DRAFT:
+        if meta.state not in (SimulationState.DRAFT, SimulationState.FAILED):
             raise CapacityError(
-                f"Simulation {sim_id} is {meta.state}; only a draft can be started"
+                f"Simulation {sim_id} is {meta.state}; only a draft or a failed "
+                f"run can be started"
             )
+        # A failed run has a database and checkpoints, and the worker continues
+        # from them on its own. Starting it is the supported way to resume:
+        # Step 3 built the machinery and nothing else exposed it.
+        resuming = meta.state == SimulationState.FAILED
         if self.capacity() < 1:
             raise CapacityError(
                 f"Already running {self.config.MAX_CONCURRENT_SIMULATIONS} "
@@ -288,12 +295,13 @@ class SimulationManager:
             sim_id=sim_id, pid=process.pid or -1,
             start_time=process_start_time(process.pid or -1),
             concurrency=share, spawned_at=time.time(),
-            socket=str(socket_path(sim_dir)),
+            socket=str(socket_path(sim_dir)), resumed=resuming,
         )
         self._processes[sim_id] = process
         self._save_record(record)
         self.store.mark_started(sim_id)
-        logger.info("Started %s as pid %s with concurrency %d", sim_id, process.pid, share)
+        logger.info("%s %s as pid %s with concurrency %d",
+                    "Resumed" if resuming else "Started", sim_id, process.pid, share)
         return record
 
     def status(self, sim_id: str) -> dict[str, Any]:

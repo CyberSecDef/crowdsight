@@ -21,7 +21,8 @@ from flask import Blueprint, jsonify, request
 
 from app.services.runtime import get_runtime
 from app.services.simulation_config_generator import ScenarioError
-from app.services.simulation_store import SimulationNotFound
+from app.services.simulation_manager import CapacityError
+from app.services.simulation_store import SimulationNotFound, SimulationState
 from app.services.tasks import TaskProgress, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,13 @@ bp = Blueprint("simulation", __name__, url_prefix="/api/simulations")
 #: Enough names for the quote check to be meaningful without loading a whole
 #: large graph into memory on every edit.
 ENTITY_LIMIT = 500
+
+#: Population size when the caller does not say. Small enough to finish in
+#: minutes on one GPU; the spec's headline figure of 300 is an overnight job.
+DEFAULT_AGENTS = 20
+
+#: Share of the population drawn from people the document actually names.
+DEFAULT_NAMED_RATIO = 0.25
 
 
 def _error(message: str, status: int, **extra: Any):
@@ -42,8 +50,15 @@ def _missing_simulation(exc: SimulationNotFound):
     return _error(str(exc), 404)
 
 
-def _graph_context(graph_id: str) -> tuple[str, list[str]]:
-    """The document and entity names an edit is verified against."""
+async def graph_context(graph_id: str) -> tuple[str, list[str]]:
+    """The document and entity names an edit is verified against.
+
+    Async, and awaited directly by the background jobs. A job already runs *on*
+    the runner's event loop, so calling the synchronous ``runtime.run`` facade
+    from inside one submits work to the loop that is waiting for it and
+    deadlocks until the 60-second timeout fires. The sync wrapper below exists
+    only for request handlers, which have no loop of their own.
+    """
     if not graph_id:
         return "", []
     runtime = get_runtime()
@@ -52,9 +67,14 @@ def _graph_context(graph_id: str) -> tuple[str, list[str]]:
     except Exception as exc:  # noqa: BLE001 - a missing document is not fatal here
         logger.warning("No document for graph %r: %s", graph_id, exc)
         document = ""
-    page = runtime.run(runtime.graphs.list_entities(graph_id, limit=ENTITY_LIMIT))
+    page = await runtime.graphs.list_entities(graph_id, limit=ENTITY_LIMIT)
     names = [str(item.get("name", "")) for item in page.items]
     return document, [name for name in names if name]
+
+
+def _graph_context(graph_id: str) -> tuple[str, list[str]]:
+    """Blocking form, for Flask handlers only. Never call this from a job."""
+    return get_runtime().run(graph_context(graph_id))
 
 
 # --------------------------------------------------------------------------
@@ -73,7 +93,7 @@ async def derive_scenario_job(
     runtime = get_runtime()
     progress.update(stage="scenario", progress=0.1, graph_id=graph_id,
                     message=f"Reading graph {graph_id}")
-    document, named = _graph_context(graph_id)
+    document, named = await graph_context(graph_id)
     if not document:
         raise ScenarioError(f"Graph {graph_id!r} has no stored document to derive from.")
 
@@ -188,3 +208,399 @@ def update_config(sim_id: str):
     if result.changes:
         logger.info("Edit to %s corrected: %s", sim_id, "; ".join(result.changes))
     return jsonify(result.to_dict()), 201 if result.forked else 200
+
+
+# ==========================================================================
+# Phase 6 Step 5 — the control API
+#
+# The spec names singular routes; the plural ones above came from Phase 5
+# Step 3 and stay, because the edit-and-fork flow built on
+# `PUT /api/simulations/<id>/config` has no equivalent in the spec's list.
+# Where both reach the same data they read the same store.
+# ==========================================================================
+
+control = Blueprint("simulation_control", __name__, url_prefix="/api/simulation")
+
+control.register_error_handler(SimulationNotFound, _missing_simulation)
+
+
+def _body() -> dict[str, Any]:
+    return request.get_json(silent=True) or {}
+
+
+def _sim_id_from(payload: dict[str, Any]) -> str:
+    sim_id = str(payload.get("sim_id") or "").strip()
+    if not sim_id:
+        raise SimulationNotFound("sim_id is required")
+    return sim_id
+
+
+# --------------------------------------------------------------------------
+# Create and prepare
+# --------------------------------------------------------------------------
+
+
+@control.post("/create")
+def create():
+    """Reserve a simulation. Cheap: no inference, no population, no scenario.
+
+    Separate from `prepare` because preparing costs minutes of local inference
+    and an operator needs an id to watch it against before it starts.
+    """
+    runtime = get_runtime()
+    payload = _body()
+    graph_id = str(payload.get("graph_id") or "").strip()
+    if not graph_id:
+        return _error("graph_id is required", 400)
+    if runtime.run(runtime.graphs.get_graph(graph_id)) is None:
+        return _error(f"No graph {graph_id!r}", 404)
+
+    platform = str(payload.get("platform") or "twitter").strip().lower()
+    if platform not in {"twitter", "reddit"}:
+        return _error(f"Unsupported platform {platform!r}", 400)
+
+    try:
+        rounds = _optional_int(payload, "rounds", minimum=1)
+        total_agents = _optional_int(payload, "total_agents", minimum=1)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+    named_ratio = payload.get("named_ratio")
+    if named_ratio is not None:
+        try:
+            named_ratio = float(named_ratio)
+        except (TypeError, ValueError):
+            return _error("named_ratio must be a number between 0 and 1", 400)
+        if not 0.0 <= named_ratio <= 1.0:
+            return _error("named_ratio must be between 0 and 1", 400)
+
+    if total_agents and total_agents > runtime.config.MAX_AGENTS:
+        return _error(
+            f"total_agents {total_agents} exceeds MAX_AGENTS "
+            f"({runtime.config.MAX_AGENTS})", 400)
+
+    meta = runtime.sims.create_pending(
+        graph_id=graph_id, platform=platform, rounds=rounds,
+        total_agents=total_agents, named_ratio=named_ratio,
+    )
+    return jsonify({
+        "sim_id": meta.sim_id,
+        "graph_id": graph_id,
+        "platform": platform,
+        "state": meta.state,
+        "prepared": False,
+        "next": "/api/simulation/prepare",
+    }), 201
+
+
+def _optional_int(payload: dict[str, Any], name: str, *, minimum: int) -> int | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a whole number") from None
+    if number < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return number
+
+
+async def prepare_job(
+    progress: TaskProgress,
+    *,
+    sim_id: str,
+    graph_id: str,
+    platform: str,
+    rounds: int | None,
+    total_agents: int,
+    named_ratio: float,
+) -> dict[str, Any]:
+    """Build the population and derive the scenario. The expensive half.
+
+    Resumable by construction: Phase 4 Step 4 keys generation on a plan
+    fingerprint, so an interrupted prepare finishes the agents it had not got
+    to rather than paying for the whole population again.
+    """
+    from app.services.oasis_profiles import write_profiles
+    from app.services.ontology_generator import Ontology
+    from app.services.population import plan_population, sketch_population
+    from app.services.profile_generator import EntityContext, ProfileGenerator
+    from app.services.profile_job import generate_population
+
+    runtime = get_runtime()
+    progress.update(stage="prepare", progress=0.02, graph_id=graph_id,
+                    message=f"Reading graph {graph_id}")
+    document, named = await graph_context(graph_id)
+    if not document:
+        raise ScenarioError(f"Graph {graph_id!r} has no stored document.")
+
+    entities = await runtime.graphs.list_entities(graph_id, limit=ENTITY_LIMIT)
+    contexts = [
+        EntityContext(
+            uuid=str(item.get("uuid") or ""), name=str(item.get("name") or ""),
+            type=str(item.get("type") or "Person"),
+            attributes={k: str(v) for k, v in (item.get("attributes") or {}).items()},
+        )
+        for item in entities.items if item.get("name")
+    ]
+
+    ontology_path = runtime.builder.ontology_path(graph_id)
+    ontology = Ontology.load(ontology_path) if ontology_path.is_file() else None
+
+    progress.update(stage="sketch", progress=0.08,
+                    message="Sketching the affected population")
+    sketch = await sketch_population(ontology, document, runtime.llm) if ontology \
+        else await sketch_population(None, document, runtime.llm)
+
+    generator = ProfileGenerator(runtime.config, llm=runtime.llm)
+    plan = plan_population(contexts, total=total_agents, sketch=sketch,
+                           generator=generator, named_ratio=named_ratio)
+
+    profiles_dir = runtime.sims.profiles_dir(sim_id)
+
+    def report(done: int, total: int, name: str) -> None:
+        progress.update(
+            stage="personas", progress=0.10 + 0.65 * (done / max(total, 1)),
+            message=f"Generated {done}/{total} personas ({name})")
+
+    result = await generate_population(generator, plan, profiles_dir,
+                                       progress=report)
+    if not result.profiles:
+        raise ScenarioError("No personas could be generated for this population.")
+
+    progress.update(stage="profiles", progress=0.80,
+                    message=f"Writing {len(result.profiles)} agent profile(s)")
+    bundle = write_profiles(result.profiles, profiles_dir)
+
+    progress.update(stage="scenario", progress=0.88,
+                    message="Deriving the scenario")
+    config = await runtime.scenarios.generate(
+        document, ontology=ontology, named_entities=named, graph_id=graph_id,
+        platform=platform, rounds=rounds,
+    )
+    runtime.sims.save_config(sim_id, config)
+
+    payload = {
+        "sim_id": sim_id,
+        "graph_id": graph_id,
+        "profiles": bundle.count,
+        "named": bundle.named,
+        "synthetic": bundle.synthetic,
+        "failures": result.failures,
+        "summary": config.summary(),
+        "warnings": config.warnings(),
+        "config": config.model_dump(),
+    }
+    progress.await_review(
+        payload,
+        f"Ready for review: {bundle.count} agent(s), {config.summary()}",
+        stage="simulation_review",
+    )
+    return payload
+
+
+@control.post("/prepare")
+def prepare():
+    """Generate the population and derive the scenario. Returns a task to poll."""
+    runtime = get_runtime()
+    payload = _body()
+    sim_id = _sim_id_from(payload)
+    meta = runtime.sims.load_meta(sim_id)
+
+    if runtime.manager.is_running(sim_id):
+        return _error(f"Simulation {sim_id} is running; stop it first", 409)
+    if meta.locked:
+        return _error(
+            f"Simulation {sim_id} is {meta.state} and its configuration is frozen", 409)
+
+    force = bool(payload.get("force"))
+    if runtime.sims.prepared(sim_id) and not force:
+        return jsonify({
+            "sim_id": sim_id, "prepared": True, "task_id": None,
+            "message": "Already prepared. Pass force=true to build it again.",
+        }), 200
+
+    request_payload = runtime.sims.request(sim_id)
+    graph_id = str(payload.get("graph_id") or request_payload.get("graph_id")
+                   or meta.graph_id or "")
+    if not graph_id:
+        return _error("This simulation has no graph_id to prepare from", 400)
+
+    platform = str(payload.get("platform") or request_payload.get("platform")
+                   or meta.platform or "twitter")
+    rounds = payload.get("rounds") or request_payload.get("rounds")
+    total_agents = int(payload.get("total_agents")
+                       or request_payload.get("total_agents") or 0) \
+        or min(runtime.config.MAX_AGENTS, DEFAULT_AGENTS)
+    named_ratio = payload.get("named_ratio")
+    if named_ratio is None:
+        named_ratio = request_payload.get("named_ratio")
+    named_ratio = DEFAULT_NAMED_RATIO if named_ratio is None else float(named_ratio)
+
+    if total_agents > runtime.config.MAX_AGENTS:
+        return _error(
+            f"total_agents {total_agents} exceeds MAX_AGENTS "
+            f"({runtime.config.MAX_AGENTS})", 400)
+
+    if force:
+        _discard_profiles(runtime.sims.profiles_dir(sim_id))
+
+    task = runtime.tasks.create("simulation.prepare", graph_id=graph_id)
+    runtime.runner.submit(task, lambda p: prepare_job(
+        p, sim_id=sim_id, graph_id=graph_id, platform=platform,
+        rounds=int(rounds) if rounds else None,
+        total_agents=total_agents, named_ratio=named_ratio,
+    ))
+    return jsonify({
+        "sim_id": sim_id,
+        "task_id": task.id,
+        "status": TaskStatus.RUNNING,
+        "agents": total_agents,
+        "poll": f"/api/simulation/prepare/status?task_id={task.id}",
+    }), 202
+
+
+def _discard_profiles(directory: Any) -> None:
+    """Remove a previous population so generation genuinely starts over."""
+    import shutil
+
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+@control.get("/prepare/status")
+def prepare_status():
+    """Poll a preparation task."""
+    runtime = get_runtime()
+    task_id = request.args.get("task_id", "").strip()
+    if not task_id:
+        return _error("task_id is required", 400)
+    task = runtime.tasks.get(task_id)
+    if task is None:
+        return _error(f"No task {task_id!r}", 404)
+    return jsonify(task.to_dict())
+
+
+# --------------------------------------------------------------------------
+# Reading
+# --------------------------------------------------------------------------
+
+
+@control.get("/list")
+def list_all():
+    runtime = get_runtime()
+    metas = runtime.sims.list(graph_id=request.args.get("graph_id"))
+    running = set(runtime.manager.running())
+    return jsonify({"simulations": [
+        {**meta.model_dump(),
+         "prepared": runtime.sims.prepared(meta.sim_id),
+         "running": meta.sim_id in running}
+        for meta in metas
+    ]})
+
+
+@control.get("/<sim_id>")
+def describe(sim_id: str):
+    runtime = get_runtime()
+    payload = runtime.sims.describe(sim_id)
+    payload["running"] = runtime.manager.is_running(sim_id)
+    return jsonify(payload)
+
+
+@control.get("/<sim_id>/config")
+def config_of(sim_id: str):
+    runtime = get_runtime()
+    if not runtime.sims.prepared(sim_id):
+        return _error(f"Simulation {sim_id!r} has not been prepared yet", 409)
+    return jsonify(runtime.sims.load_config(sim_id).model_dump())
+
+
+@control.get("/<sim_id>/profiles")
+def profiles_of(sim_id: str):
+    """The population, from our own record rather than the lossy OASIS files."""
+    import json as _json
+
+    runtime = get_runtime()
+    path = runtime.sims.profiles_dir(sim_id) / "profiles.json"
+    if not path.is_file():
+        return _error(f"Simulation {sim_id!r} has no population yet", 409)
+    try:
+        profiles = _json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        return _error(f"Unreadable population file: {exc}", 500)
+
+    provenance = str(request.args.get("provenance") or "").strip().lower()
+    if provenance in {"named", "synthetic"}:
+        profiles = [p for p in profiles if p.get("provenance") == provenance]
+    return jsonify({"sim_id": sim_id, "count": len(profiles), "profiles": profiles})
+
+
+@control.get("/<sim_id>/status")
+def status_of(sim_id: str):
+    """Live progress, straight from the worker over its control socket."""
+    return jsonify(get_runtime().manager.status(sim_id))
+
+
+# --------------------------------------------------------------------------
+# Running
+# --------------------------------------------------------------------------
+
+
+@control.post("/start")
+def start():
+    """Start a prepared simulation, or resume one that failed part-way."""
+    runtime = get_runtime()
+    payload = _body()
+    sim_id = _sim_id_from(payload)
+    meta = runtime.sims.load_meta(sim_id)
+
+    if not runtime.sims.prepared(sim_id):
+        return _error(
+            f"Simulation {sim_id!r} has no scenario yet; prepare it first", 409)
+    if not (runtime.sims.profiles_dir(sim_id) / "profiles.json").is_file():
+        return _error(
+            f"Simulation {sim_id!r} has no population yet; prepare it first", 409)
+
+    resuming = meta.state == SimulationState.FAILED
+    try:
+        record = runtime.manager.start(sim_id)
+    except CapacityError as exc:
+        return _error(str(exc), 409, budget=runtime.manager.budget())
+
+    return jsonify({
+        "sim_id": sim_id,
+        "pid": record.pid,
+        "concurrency": record.concurrency,
+        "resumed": resuming,
+        "state": SimulationState.RUNNING,
+        "poll": f"/api/simulation/{sim_id}/status",
+    }), 202
+
+
+@control.post("/stop")
+def stop():
+    """Ask a run to stop at the next round boundary, then insist."""
+    runtime = get_runtime()
+    payload = _body()
+    sim_id = _sim_id_from(payload)
+    runtime.sims.load_meta(sim_id)
+
+    timeout = payload.get("timeout")
+    try:
+        seconds = float(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        return _error("timeout must be a number of seconds", 400)
+
+    outcome = runtime.manager.stop(
+        sim_id, **({"timeout": seconds} if seconds is not None else {}))
+    return jsonify({
+        "sim_id": sim_id,
+        "outcome": outcome,
+        "state": runtime.sims.load_meta(sim_id).state,
+    })
+
+
+@control.get("/budget")
+def budget():
+    """Where the inference budget went. An operator asks this when a run crawls."""
+    return jsonify(get_runtime().manager.budget())

@@ -234,6 +234,14 @@ if any of them succeeds.
 
 ## Running a simulation
 
+The API mirrors these steps: `POST /api/simulation/create` reserves a run,
+`POST /api/simulation/prepare` builds the population and derives the scenario (async —
+poll `GET /api/simulation/prepare/status?task_id=…`), `POST /api/simulation/start` runs
+it, `GET /api/simulation/<id>/status` reports live progress, and `POST
+/api/simulation/stop` ends it at the next round boundary. `GET /api/simulation/budget`
+shows how the inference budget is divided when a run seems slow. Starting a run that
+previously failed resumes it from its last checkpoint and says so.
+
 1. **Upload** a source document (PDF, Markdown, or text, under 50 MB). Review the proposed
    ontology and adjust entity/relationship types, then start extraction. Inspect the
    resulting knowledge graph.

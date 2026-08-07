@@ -21,6 +21,7 @@ from typing import Any, Awaitable
 from app.config import Config, get_config
 from app.services.graph_builder import GraphBuilder
 from app.services.simulation_config_generator import SimulationConfigGenerator
+from app.services.simulation_manager import SimulationManager
 from app.services.simulation_store import SimulationStore
 from app.services.tasks import TaskRunner, TaskStore
 from app.storage.embedding_service import EmbeddingService
@@ -61,6 +62,10 @@ class Runtime:
             self.storage, self.config, embeddings=self.embeddings, graphs=self.graphs
         )
         self.sims = SimulationStore(self.sim_dir)
+        self.manager = SimulationManager(self.sims, config=self.config)
+        # Anything recorded as running belongs to a previous incarnation of
+        # this process: adopt what still answers, bury what does not.
+        self.manager.reap_orphans()
         self.scenarios = SimulationConfigGenerator(self.config, llm=self.llm)
         self.builder = GraphBuilder(
             self.storage, self.config, data_dir=self.data_dir,

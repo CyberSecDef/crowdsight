@@ -638,8 +638,24 @@ Config: `GRAPH_MEMORY_FEEDBACK` (default off), `GRAPH_MEMORY_MIN_ENGAGEMENT` (1)
 
 **Tests:** `tests/test_graph_memory.py` — 27 unit tests plus an `integration` test that asserts the simulated/documented line holds against a live Neo4j.
 
-**Step 5: Simulation control API**
+**Step 5: Simulation control API** ✅
 Build `backend/app/api/simulation.py`: `POST /api/simulation/create`, `POST /api/simulation/prepare` (async profile + config generation, returns task ID), `GET /api/simulation/prepare/status`, `GET /api/simulation/<id>/config`, `GET /api/simulation/<id>/profiles`, `POST /api/simulation/start`, `POST /api/simulation/stop`, `GET /api/simulation/list`.
+
+Every endpoint above is implemented, plus `GET /api/simulation/<id>/status` (live progress from the worker's socket) and `GET /api/simulation/budget` (where the inference budget went — the first thing an operator asks when a run crawls). The Phase 5 Step 3 routes under `/api/simulations` stay: the edit-and-fork flow built on `PUT /api/simulations/<id>/config` has no equivalent in the spec's list, and both surfaces read the same store.
+
+**Verified through real HTTP against the running stack, end to end**: upload a document, build the graph, create, prepare, start, watch live status, complete. 22/22 checks. This is the first time the whole pipeline has run as a user would drive it.
+
+**A real deadlock, found only by that end-to-end run.** `prepare_job` executes *on* the runner's event loop, and the shared `_graph_context` helper called `runtime.run()` — the synchronous facade that submits work to that same loop and blocks. The job hung until the 60-second timeout and reported a bare `TimeoutError`. **Phase 5's `derive_scenario_job` had the identical bug and had been passing its tests**, because the test stub's `run()` used `asyncio.run()` and quietly created a second loop where the real one deadlocks. Both jobs now await directly; the blocking wrapper survives for request handlers, which have no loop of their own. Both stubs now raise if `run()` is called from inside a running loop, so this class of bug fails in the fast suite rather than in a live run.
+
+**Create and prepare are separate because preparing costs minutes of inference.** `create` reserves an id and records the request; nothing is generated. `prepare` runs the whole population pipeline — sketch, plan, personas, OASIS profile files, scenario derivation — as one background task reporting progress through each stage. Preparing an already-prepared simulation returns immediately rather than spending the GPU again; `force=true` discards the population and rebuilds, and does so by deleting it, since Phase 4's resumability would otherwise helpfully "resume" the very population being replaced.
+
+**`start` resumes a failed run.** Step 3 built checkpoint-and-resume and nothing exposed it; during that step's verification the state had to be reset by hand. Starting a `failed` simulation now continues from its last checkpoint, and the response says `resumed: true`, because a resumed run and a fresh one mean different things about what the resulting data covers.
+
+**State guards answer 409, not 404 or a late crash.** A simulation that exists but has no scenario yet is not missing; asking for its config says so. Starting without a scenario, or without a population, is refused up front rather than by a worker dying on a missing file minutes into a run.
+
+The `Runtime` now owns a `SimulationManager` and reaps orphans on startup, so an API restart adopts healthy runs and buries the rest without anyone asking.
+
+**Tests:** `tests/test_simulation_control_api.py` — 50 tests covering routing (the static `/list`, `/budget` and `/prepare/status` routes must not be swallowed by `/<sim_id>`), every state guard, resume, and the deadlock.
 
 **Step 6: Engine test units**
 **Tests:** `tests/test_ollama_model_binding.py` — assert `ModelFactory` is constructed with `ModelPlatformType.OLLAMA` and the configured local URL, and that no code path can construct an OpenAI-cloud model. Guards the core privacy property at the unit level.

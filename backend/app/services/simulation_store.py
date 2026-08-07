@@ -25,6 +25,7 @@ what a human actually changed.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -46,6 +47,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "CONFIG_FILE",
     "META_FILE",
+    "PROFILES_DIR",
+    "REQUEST_FILE",
     "EditResult",
     "SimulationMeta",
     "SimulationNotFound",
@@ -57,6 +60,8 @@ __all__ = [
 DEFAULT_SIM_DIR = Path("data/simulations")
 CONFIG_FILE = "config.json"
 META_FILE = "meta.json"
+REQUEST_FILE = "request.json"
+PROFILES_DIR = "profiles"
 
 #: ``sim-20260805-143022-a1b2c3``. Sorts chronologically in a directory
 #: listing, which is how an operator actually finds a run, and the random tail
@@ -200,6 +205,59 @@ class SimulationStore:
         )
         return meta
 
+    def create_pending(
+        self, *, graph_id: str, platform: str = "twitter", rounds: int | None = None,
+        total_agents: int | None = None, named_ratio: float | None = None,
+    ) -> SimulationMeta:
+        """Reserve a simulation before there is anything to run.
+
+        The API separates creating a simulation from preparing one, because
+        preparing costs minutes of inference and an operator needs an id to
+        watch it against. Only the request is recorded here; ``config.json``
+        arrives when preparation finishes.
+        """
+        sim_id = self._unused_sim_id()
+        meta = SimulationMeta(sim_id=sim_id, graph_id=graph_id, platform=platform)
+        request = {
+            "graph_id": graph_id, "platform": platform, "rounds": rounds,
+            "total_agents": total_agents, "named_ratio": named_ratio,
+        }
+        _atomic_write(self.sim_dir(sim_id) / REQUEST_FILE,
+                      json.dumps(request, indent=2))
+        self.save_meta(meta)
+        logger.info("Simulation %s reserved for graph %r", sim_id, graph_id)
+        return meta
+
+    def request(self, sim_id: str) -> dict[str, Any]:
+        """What the operator asked for when the simulation was created."""
+        path = self.sim_dir(sim_id) / REQUEST_FILE
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            logger.warning("Unreadable request for %s", sim_id)
+            return {}
+
+    def prepared(self, sim_id: str) -> bool:
+        """True once there is a scenario to run."""
+        try:
+            return self.config_path(sim_id).is_file()
+        except SimulationNotFound:
+            return False
+
+    def save_config(self, sim_id: str, config: SimulationConfig) -> None:
+        """Attach a derived scenario to a simulation that was only reserved."""
+        _atomic_write(self.config_path(sim_id), config.model_dump_json(indent=2))
+        meta = self.load_meta(sim_id)
+        meta.platform = config.platform
+        meta.graph_id = config.graph_id or meta.graph_id
+        meta.updated_at = _now()
+        self.save_meta(meta)
+
+    def profiles_dir(self, sim_id: str) -> Path:
+        return self.sim_dir(sim_id) / PROFILES_DIR
+
     def _unused_sim_id(self, attempts: int = 8) -> str:
         for _ in range(attempts):
             candidate = new_sim_id()
@@ -218,6 +276,9 @@ class SimulationStore:
     def load_meta(self, sim_id: str) -> SimulationMeta:
         path = self.meta_path(sim_id)
         if not path.is_file():
+            if (self.sim_dir(sim_id) / REQUEST_FILE).is_file():
+                raise SimulationNotFound(
+                    f"Simulation {sim_id!r} has a request but no metadata")
             if self.config_path(sim_id).is_file():
                 # A config written by hand, or metadata lost. The scenario is
                 # the valuable half; rebuild the rest rather than 404.
@@ -347,12 +408,24 @@ class SimulationStore:
         _atomic_write(self.meta_path(sim_id), meta.model_dump_json(indent=2))
 
     def describe(self, sim_id: str) -> dict[str, Any]:
-        """Everything the review UI needs for one simulation."""
+        """Everything the review UI needs for one simulation.
+
+        A simulation that has been created but not yet prepared has no scenario
+        yet, and saying so is more useful than a 404 for something that does
+        exist.
+        """
         meta = self.load_meta(sim_id)
+        if not self.prepared(sim_id):
+            return {
+                "meta": meta.model_dump(), "config": None, "prepared": False,
+                "request": self.request(sim_id), "summary": "not yet prepared",
+                "warnings": [], "editable": False,
+            }
         config = self.load_config(sim_id)
         return {
             "meta": meta.model_dump(),
             "config": config.model_dump(),
+            "prepared": True,
             "summary": config.summary(),
             "warnings": config.warnings(),
             "editable": not meta.locked,

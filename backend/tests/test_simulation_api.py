@@ -71,7 +71,18 @@ class StubRuntime:
     def run(self, coro, timeout=60.0):
         import asyncio
 
-        return asyncio.run(coro)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        # The real runtime submits to its own loop and blocks. Called from
+        # inside that loop -- which is where every background job runs -- it
+        # deadlocks until the timeout fires. A stub that quietly worked here
+        # let exactly that bug reach a live run.
+        coro.close()
+        raise AssertionError(
+            "runtime.run() was called from inside the event loop; a background "
+            "job must await directly")
 
 
 @pytest.fixture
