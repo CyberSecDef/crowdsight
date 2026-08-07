@@ -20,6 +20,11 @@ Two asymmetries are on purpose:
   that have no event loop of their own. Every call carries a timeout; the API
   must never hang because a worker is wedged mid-round.
 
+Callers are admission-controlled. A wedged worker holds each one for the full
+timeout, so without a cap a UI polling it would occupy every request thread the
+server has; beyond :data:`MAX_INFLIGHT_CALLS` in flight, a caller is refused
+quickly instead of joining the queue.
+
 Because the client blocks, it must never be called from the same event loop the
 server runs in — the loop would be unable to serve the request it is waiting
 for, and the call would time out. In production they are in different
@@ -35,6 +40,7 @@ import json
 import logging
 import os
 import socket
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -42,8 +48,10 @@ from typing import Any, Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "MAX_INFLIGHT_CALLS",
     "SOCKET_NAME",
     "ControlClient",
+    "ControlPlaneBusy",
     "ControlServer",
     "IPCError",
     "Request",
@@ -68,8 +76,31 @@ DEFAULT_TIMEOUT = 5.0
 Handler = Callable[["Request"], Awaitable[Any]]
 
 
+#: How many control calls may be in flight across the whole API process.
+#:
+#: A wedged worker holds each caller for the full timeout. Under the current
+#: dev server, which spawns a thread per request, that is merely wasteful; under
+#: a production WSGI server with a bounded pool, a UI polling a wedged run every
+#: second would tie workers up permanently and eventually starve the API of
+#: threads to serve anything else. Capping the callers here makes "a wedged
+#: worker cannot take down the API" true under any server rather than only
+#: under this one.
+MAX_INFLIGHT_CALLS = 8
+
+#: How long a caller waits for a slot before giving up. Short: if the gate is
+#: full the system is already struggling, and joining a queue behind eight
+#: blocked calls only spreads the delay to a caller who could have been told.
+SLOT_WAIT_SECONDS = 0.25
+
+_inflight = threading.BoundedSemaphore(MAX_INFLIGHT_CALLS)
+
+
 class IPCError(RuntimeError):
     """The control channel could not be used."""
+
+
+class ControlPlaneBusy(IPCError):
+    """Too many control calls are already blocked on unresponsive workers."""
 
 
 class WorkerUnreachable(IPCError):
@@ -191,7 +222,23 @@ class ControlClient:
         self.timeout = timeout
 
     def request(self, command: str, **args: Any) -> Any:
-        """Send one command and return its result, or raise."""
+        """Send one command and return its result, or raise.
+
+        Admission-controlled: a wedged worker holds its caller for the whole
+        timeout, and without a cap enough of them would occupy every thread the
+        server has.
+        """
+        if not _inflight.acquire(timeout=SLOT_WAIT_SECONDS):
+            raise ControlPlaneBusy(
+                f"{MAX_INFLIGHT_CALLS} control calls are already in flight and "
+                f"not answering; refusing to add another rather than tying up "
+                f"the API")
+        try:
+            return self._request(command, **args)
+        finally:
+            _inflight.release()
+
+    def _request(self, command: str, **args: Any) -> Any:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.settimeout(self.timeout)
         try:

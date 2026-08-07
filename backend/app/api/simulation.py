@@ -50,6 +50,11 @@ def _missing_simulation(exc: SimulationNotFound):
     return _error(str(exc), 404)
 
 
+def _control_plane_busy(exc: Exception):
+    """Too many callers are already blocked on workers that will not answer."""
+    return _error(str(exc), 503, retry_after=1)
+
+
 async def graph_context(graph_id: str) -> tuple[str, list[str]]:
     """The document and entity names an edit is verified against.
 
@@ -222,6 +227,11 @@ def update_config(sim_id: str):
 control = Blueprint("simulation_control", __name__, url_prefix="/api/simulation")
 
 control.register_error_handler(SimulationNotFound, _missing_simulation)
+
+from app.services.simulation_ipc import ControlPlaneBusy  # noqa: E402
+
+control.register_error_handler(ControlPlaneBusy, _control_plane_busy)
+bp.register_error_handler(ControlPlaneBusy, _control_plane_busy)
 
 
 def _body() -> dict[str, Any]:

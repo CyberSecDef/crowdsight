@@ -840,3 +840,125 @@ def test_the_cap_is_enforced_over_http(client, endpoint):
 def test_content_endpoints_404_on_an_unknown_simulation(client, endpoint):
     response = client.get(f"/api/simulation/sim-20260101-000000-999999/{endpoint}")
     assert response.status_code == 404
+
+
+# ==========================================================================
+# Phase 7 Step 5 — the documented shape
+#
+# The spec asks that every endpoint return the documented shape. Asserting
+# fields piecemeal, as the sections above do, proves the values are right but
+# not that the contract is whole: a key quietly dropped in a refactor breaks a
+# frontend and nothing here would notice. These name the required keys.
+#
+# Required, not exact: adding a field is a compatible change, removing or
+# renaming one is not.
+# ==========================================================================
+
+
+PAGE_KEYS = {"sim_id", "total", "limit", "offset", "count", "has_more",
+             "next_offset"}
+
+
+def assert_has(payload, keys, where):
+    missing = set(keys) - set(payload)
+    assert not missing, f"{where} is missing {sorted(missing)}"
+
+
+def test_run_status_shape(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/run-status").get_json()
+    assert_has(body, {"sim_id", "state", "round", "rounds_completed",
+                      "total_rounds", "percent", "action_counts",
+                      "last_round_actions", "agents", "started_at",
+                      "finished_at", "has_data", "live"}, "run-status")
+    assert_has(body["agents"], {"active_last_round", "skipped_last_round",
+                                "failed_last_round"}, "run-status.agents")
+
+
+def test_run_status_live_shape_while_running(client):
+    client.runtime.manager.running_ids.add(client.sim_id)
+    body = client.get(f"/api/simulation/{client.sim_id}/run-status").get_json()
+    assert_has(body["live"], {"running", "stage", "round_in_flight", "pid",
+                              "stop_requested"}, "run-status.live")
+    assert "live_stale" in body
+
+
+def test_run_status_detail_shape(client):
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/run-status/detail").get_json()
+    assert_has(body, {"sim_id", "count", "actions"}, "run-status/detail")
+    assert_has(body["actions"][0], {"user_id", "username", "name", "population",
+                                    "action", "round", "created_at", "info"},
+               "run-status/detail.actions[]")
+
+
+def test_timeline_shape(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/timeline").get_json()
+    assert_has(body, {"sim_id", "count", "from_round", "to_round", "rounds"},
+               "timeline")
+    assert_has(body["rounds"][0], {"round", "seed", "invoked", "acted", "failed",
+                                   "skipped", "events_fired", "action_counts",
+                                   "posts", "comments", "ended_at", "failures"},
+               "timeline.rounds[]")
+
+
+def test_agent_stats_shape(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/agent-stats").get_json()
+    assert_has(body, {"sim_id", "total", "limit", "offset", "has_more", "sort",
+                      "agents", "silent"}, "agent-stats")
+    assert_has(body["agents"][0],
+               {"user_id", "username", "name", "provenance", "occupation",
+                "activity_level", "population", "posts", "comments",
+                "likes_given", "dislikes_given", "actions", "following",
+                "followers", "likes_received", "reposts_received",
+                "engagement_received"}, "agent-stats.agents[]")
+
+
+def test_actions_shape(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/actions").get_json()
+    assert_has(body, PAGE_KEYS | {"order", "include_engine", "actions"}, "actions")
+    assert_has(body["actions"][0], {"user_id", "username", "name", "population",
+                                    "action", "round", "created_at", "info"},
+               "actions.actions[]")
+
+
+def test_posts_shape(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/posts").get_json()
+    assert_has(body, PAGE_KEYS | {"order", "posts"}, "posts")
+    assert_has(body["posts"][0],
+               {"post_id", "user_id", "username", "name", "population",
+                "content", "quote_content", "original_post_id", "kind", "round",
+                "created_at", "likes", "dislikes", "reposts", "comments",
+                "engagement"}, "posts.posts[]")
+
+
+def test_comments_shape(client):
+    body = client.get(f"/api/simulation/{client.sim_id}/comments").get_json()
+    assert_has(body, PAGE_KEYS | {"order", "post_id", "comments"}, "comments")
+    assert_has(body["comments"][0],
+               {"comment_id", "post_id", "user_id", "username", "name",
+                "population", "content", "round", "created_at", "likes",
+                "dislikes"}, "comments.comments[]")
+
+
+@pytest.mark.parametrize("endpoint", ["actions", "posts", "comments"])
+def test_every_paged_endpoint_shares_one_envelope(client, endpoint):
+    """A caller should not have to learn three pagination dialects."""
+    body = client.get(f"/api/simulation/{client.sim_id}/{endpoint}").get_json()
+    assert_has(body, PAGE_KEYS, endpoint)
+
+
+@pytest.mark.parametrize("endpoint", ["run-status", "run-status/detail",
+                                      "timeline", "agent-stats", "actions",
+                                      "posts", "comments"])
+def test_every_endpoint_names_its_simulation(client, endpoint):
+    body = client.get(f"/api/simulation/{client.sim_id}/{endpoint}").get_json()
+    assert body["sim_id"] == client.sim_id
+
+
+@pytest.mark.parametrize("endpoint", ["run-status/detail", "timeline",
+                                      "actions", "posts", "comments"])
+def test_an_empty_result_keeps_its_shape(client, endpoint):
+    """A UI binding to these fields must not have to special-case emptiness."""
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/{endpoint}?round=99&offset=999").get_json()
+    assert isinstance(body, dict) and body["sim_id"] == client.sim_id

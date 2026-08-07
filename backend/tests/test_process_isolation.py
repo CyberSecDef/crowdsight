@@ -234,100 +234,12 @@ def test_a_record_without_a_pid_is_dead():
 
 
 # --------------------------------------------------------------------------
-# IPC
+# The control channel has its own file
+#
+# Round-trip, timeouts and admission control moved to tests/test_ipc.py, which
+# the spec names. This file is about processes; that one is about the channel
+# between them.
 # --------------------------------------------------------------------------
-
-
-async def test_the_control_plane_carries_commands(short_tmp):
-    path = socket_path(short_tmp)
-    server = ControlServer(path)
-    seen: list[str] = []
-
-    async def on_ping(_request):
-        return {"pong": True}
-
-    async def on_stop(request):
-        seen.append(request.command)
-        return {"accepted": True}
-
-    async def on_boom(_request):
-        raise ValueError("handler exploded")
-
-    server.handle("ping", on_ping)
-    server.handle("stop", on_stop)
-    server.handle("boom", on_boom)
-    await server.start()
-
-    client = ControlClient(path, timeout=5.0)
-    try:
-        # The client blocks and the server shares this loop, so it must run
-        # off-loop here. In production they are separate processes.
-        assert await asyncio.to_thread(client.ping)
-        assert (await asyncio.to_thread(client.request, "stop"))["accepted"]
-        assert seen == ["stop"]
-
-        with pytest.raises(IPCError, match="Unknown command"):
-            await asyncio.to_thread(client.request, "nonsense")
-
-        with pytest.raises(IPCError, match="handler exploded"):
-            await asyncio.to_thread(client.request, "boom")
-
-        assert await asyncio.to_thread(client.ping), "a bad command did not kill it"
-    finally:
-        await server.close()
-
-    assert not path.exists()
-    assert not await asyncio.to_thread(client.ping)
-
-
-def test_an_absent_worker_is_unreachable_not_a_hang(short_tmp):
-    client = ControlClient(socket_path(short_tmp), timeout=1.0)
-    started = time.monotonic()
-    assert not client.ping()
-    assert time.monotonic() - started < 1.0
-
-
-async def test_a_stale_socket_file_does_not_block_a_restart(short_tmp):
-    """A killed worker leaves one behind; bind() would fail on it."""
-    path = socket_path(short_tmp)
-    path.write_bytes(b"")
-
-    async def on_ping(_request):
-        return {"pong": True}
-
-    server = ControlServer(path)
-    server.handle("ping", on_ping)
-    await server.start()
-    try:
-        assert await asyncio.to_thread(ControlClient(path).ping)
-    finally:
-        await server.close()
-
-
-async def test_a_live_socket_is_never_clobbered(short_tmp):
-    """Otherwise starting a run twice would orphan the first worker."""
-    path = socket_path(short_tmp)
-
-    async def on_ping(_request):
-        return {"pong": True}
-
-    first = ControlServer(path)
-    first.handle("ping", on_ping)
-    await first.start()
-    try:
-        with pytest.raises(IPCError, match="already listening"):
-            await ControlServer(path).start()
-    finally:
-        await first.close()
-
-
-def test_an_over_long_socket_path_is_refused_clearly(tmp_path):
-    """The kernel's sun_path limit fails at bind() with a confusing error."""
-    from app.services.simulation_ipc import IPCError as Err
-
-    deep = tmp_path / ("x" * 90) / ("y" * 90)
-    with pytest.raises(Err, match="too long"):
-        socket_path(deep)
 
 
 # --------------------------------------------------------------------------

@@ -740,10 +740,20 @@ Both implemented. Verified against a live worker: 11/11 checks, including shutti
 
 **A consistency gap the tests found:** these two routes were leaving the 404 for an unknown simulation to the manager, while every other route validates it itself. With a manager that does not validate — a stub, or a future one — the endpoint would answer `200` about a simulation that does not exist. They now check, like the rest.
 
-**Step 5: Monitoring test units**
+**Step 5: Monitoring test units** ✅
 **Tests:** `tests/test_monitoring_api.py` — every endpoint returns the documented shape; pagination boundaries are correct; filters compose.
 `tests/test_interview.py` — a single interview returns a response attributed to the right agent; batch returns one result per request; interviewing a non-existent agent errors cleanly; an interview against a stopped simulation fails fast rather than hanging.
 `tests/test_ipc.py` — control messages round-trip; a timeout on an unresponsive process is handled without deadlocking the API.
+
+All three files exist and pass. `test_monitoring_api.py` and `test_interview.py` were written as Steps 1–3 landed; this step added `test_ipc.py` and audited the other two against the wording above.
+
+**The audit found a gap in "every endpoint returns the documented shape."** The existing tests asserted values field by field, which proves the numbers are right but not that the contract is whole — a key quietly dropped in a refactor would break a frontend and nothing would have noticed. Fourteen shape tests now name the required keys of every response and every element, assert the three paged endpoints share one envelope so a caller need not learn three pagination dialects, and check that an empty result keeps its shape rather than collapsing into something a UI has to special-case. Required rather than exact: adding a field is compatible, removing or renaming one is not.
+
+**`test_ipc.py` took the round-trip tests from `test_process_isolation.py`** — that file is about processes, this one is about the channel between them — and added what the spec actually asks for: a blocked call must not stop other work.
+
+**The deadlock requirement led to a real hardening.** Today's dev server spawns a thread per request, so a wedged worker cannot deadlock it; Phase 10 replaces that with a production WSGI server whose worker pool is bounded, where a UI polling a wedged run every second with a two-second timeout would tie workers up permanently and eventually starve the API. Control calls are now admission-controlled: at most eight in flight process-wide, and a caller beyond that is refused in a quarter of a second with a `503` rather than joining the queue. The property "a wedged worker cannot take down the API" now holds under any server rather than only under this one. Verified over HTTP with twenty-four concurrent control calls: all resolved, none hung, and the rest of the API kept serving throughout.
+
+**Writing those tests exposed a test-isolation problem worth recording.** The gate is process-global by design — it bounds the whole API, not one caller — which also makes it shared between tests, and a call one test abandons keeps its slot until its own timeout expires. The next test then failed for reasons that had nothing to do with it. The tests now wait for the gate to drain at both ends; the alternative, a per-caller gate, would not bound anything.
 
 ---
 
