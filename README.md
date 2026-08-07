@@ -427,6 +427,33 @@ suite despite costing ~4s to import OASIS: they are the checks that a simulation
 actually load its agents and that those agents will actually be able to act, and they
 are worth always running.
 
+### Stress testing
+
+`scripts/stress.sh` runs an opt-in load generator that deliberately does what the rest
+of the system prevents: it overrides `MAX_AGENTS`, `MAX_CONCURRENT_SIMULATIONS` and the
+`LLM_CONCURRENCY` budget, then runs five loads at once — inference far past the
+concurrency bound, large embedding batches, several full simulations in parallel
+processes, document parsing across every core, and concurrent graph writes.
+
+**It will make the machine unresponsive while it runs.** That is its purpose. It is
+gated twice — a `stress` marker the default `addopts` deselects, and an explicit
+`CROWDSIGHT_STRESS=1` — so it cannot run by accident.
+
+```bash
+scripts/stress.sh                      # 12 minutes, the default shape
+MINUTES=3 scripts/stress.sh            # a short, sharp burst
+SIMS=6 AGENTS=80 scripts/stress.sh     # heavier
+```
+
+It samples CPU, memory and process count from inside the container and the GPU from the
+host (the backend image has no `nvidia-smi`), and writes `data/stress-report.json` plus
+a per-second `data/stress-gpu.csv`. It asserts nothing about throughput — the numbers
+depend on whatever else the box is doing — only that load was generated at all.
+
+The graph load prunes as it writes: unbounded, it produces enough 768-dimension vectors
+to exhaust Neo4j's heap within a run, which is a different failure from the one being
+looked for.
+
 **`tests/test_simulation_smoke.py` is the release gate.** Two tests: the micro-run
 (3 agents, 2 rounds against real local Ollama, asserting round attribution and per-action
 counts), and the whole pipeline — create, prepare, start, complete — with a population the
