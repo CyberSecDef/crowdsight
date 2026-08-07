@@ -64,3 +64,17 @@ export async function provision(request, { agents = 4, rounds = 2 } = {}) {
 export async function launchableSimulation(request) {
   return (await findLaunchable(request)) || provision(request)
 }
+
+/**
+ * A simulation deliberately long enough to still be running when something
+ * else needs it live.
+ *
+ * A 4-agent, 2-round run finishes in under a minute, which is faster than a
+ * browser test can start it, load a page and click a button — so the interview
+ * test found the worker already gone and reported it as a fault. More rounds
+ * buys a real window. Always provisioned fresh: reusing a draft would reuse
+ * its round count too.
+ */
+export async function longRunningSimulation(request, { rounds = 8 } = {}) {
+  return provision(request, { agents: 4, rounds })
+}

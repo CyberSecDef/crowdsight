@@ -12,7 +12,7 @@
  */
 
 import { get, post, put, del, request } from './client.js'
-import { watchTask } from './polling.js'
+import { isSettled, pollUntil, watchTask } from './polling.js'
 
 export * from './client.js'
 export * from './polling.js'
@@ -116,10 +116,29 @@ export const simulation = {
     get(`/simulation/${encodeURIComponent(simId)}/comments`, query),
 
   // Stage 5
+  //
+  // Asking one agent is synchronous; asking several or everyone returns a task
+  // to watch. All three refuse with a 409 unless the run is live — the agent
+  // answers from memory that lives in the running worker.
   interview: (body) => post('/simulation/interview', body),
   interviewBatch: (body) => post('/simulation/interview/batch', body),
   interviewAll: (body) => post('/simulation/interview/all', body),
+  /** History is written to the run's database and outlives the worker. */
   interviewHistory: (body) => post('/simulation/interview/history', body),
+  /**
+   * Watch a batch or whole-population interview.
+   *
+   * Interview tasks are polled through `prepare/status?task_id=`, which despite
+   * its name is the control plane's generic task poller — and it takes the id
+   * as a query parameter, not a path segment, so the shared `watchTask` helper
+   * does not fit it.
+   */
+  watchInterview(taskId, options = {}) {
+    return pollUntil(() => get('/simulation/prepare/status', { task_id: taskId }), {
+      ...options,
+      done: (task) => isSettled(task?.status),
+    })
+  },
 
   envStatus: (body) => post('/simulation/env-status', body),
   closeEnv: (body) => post('/simulation/close-env', body),

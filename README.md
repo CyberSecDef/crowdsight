@@ -227,8 +227,8 @@ other things that the bundle names no external host and that the container canno
 one. The frontend also carries its own suites, run from `frontend/`:
 
 ```bash
-npm test              # 164 unit tests — polling, limits, ontology, profiles, scenario, influence
-npm run test:e2e      # 72 browser tests — needs the stack up; npx playwright install chromium
+npm test              # 191 unit tests — polling, limits, ontology, profiles, scenario, influence, interviews
+npm run test:e2e      # 80 browser tests — needs the stack up; npx playwright install chromium
 ```
 
 The browser tests run against the real gateway rather than a dev server, because the CSP,

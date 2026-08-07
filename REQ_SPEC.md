@@ -951,8 +951,24 @@ Verified against a real generated report: **38 HTTP checks, 164 unit tests, 72 b
 
 **The verification section is rendered before the prose, not after it.** Phase 8 Step 3 established that it is always shown, including on a clean report; putting it first means a reader sees how much of the report survived checking before reading what it claims.
 
-**Step 6: Stage 5 — interaction**
+**Step 6: Stage 5 — interaction** ✅
 Interview UI: pick an agent (or all), ask a question, view responses, browse interview history.
+
+Verified against a live run: **38 HTTP checks, 191 unit tests, 80 browser tests**, including a real agent answering a real question through the running worker.
+
+**One constraint shapes the whole screen: an interview needs a live worker.** The agent answers in character from accumulated memory, and that memory lives in the running process — so a run that has stopped has nobody to ask, and the backend refuses with a 409. History is different: it is written to the run's own database and stays readable long afterwards. The ask controls are therefore shown **disabled with the reason beside them** rather than hidden, because "why can't I ask?" is the first question and an absent form answers it by leaving the reader to guess. A draft says nobody has been asked *yet*; a finished run says its agents are no longer in memory and that restarting it in stage 3 would make them answerable again.
+
+**Asking everyone confirms first, naming the cost.** It is one model call per agent on the same GPU as anything else running, and it cannot be called back once it starts.
+
+**A failed interview is kept on screen even though history is reloaded.** History is the durable record, so it is refreshed after every ask — but an interview that failed has an error worth showing and nothing written to the trace. Refreshing history alone would make the failure vanish and leave the operator with fewer answers than agents asked and no reason why.
+
+**Two gaps between "running" and "answerable", found by driving it live.**
+
+A short run finishes faster than a browser can click. The view read the state once on load, so it kept the form enabled against a worker that had already exited, and the refusal surfaced as a generic fault. It now re-reads the state when an ask fails, and watches for the run ending while the page is open — a live run is exactly the case where the answer to "can I ask?" changes underneath the reader.
+
+The opposite case has the same error message and the opposite meaning: `start` returns as soon as the process is spawned, but the worker then builds the OASIS environment and only opens its control socket at the end of that. An interview in that gap gets "no worker listening" while the run is genuinely live and about to be answerable. The two are now told apart, and the second says to try again in a moment. **`env-status`'s `accepting_commands` is the precise signal** — a process being alive is not the same as its socket being open, and the browser test waits on the former rather than assuming the latter.
+
+**A note on the interview task's progress.** `interview_job` documents itself as "reporting as answers arrive", but it awaits `conduct` in a single thread call and reports only twice — at 5% and at 100%. Nothing is wrong with the behaviour; the docstring promises a granularity it does not deliver, and a UI built to stream partial answers from it would show nothing until the end.
 
 **Step 7: Frontend test units**
 **Tests:** component tests with Vitest for upload validation, config form validation, and polling state machines (idle → running → complete → error). One Playwright end-to-end test walking upload → graph → profiles → short run → report against a live sealed stack.
