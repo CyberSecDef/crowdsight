@@ -896,8 +896,22 @@ Built as one view with four phases derived from what exists rather than from a w
 
 **Reopening a parked graph used to show the upload form again.** `loadGraph` 404s while extraction has not run, which was treated as "nothing here" — so the URL for a graph waiting on its ontology offered to start a fresh document. Parking exists precisely so a person can leave and come back, so a 404 now checks for a pending ontology and resumes the review.
 
-**Step 3: Stage 2 — environment setup**
+**Step 3: Stage 2 — environment setup** ✅
 Profile review: browse generated agents, inspect personas, see the named-vs-synthetic breakdown clearly, and edit or remove agents before the run.
+
+**This step needed a backend endpoint that did not exist.** `/api/simulation/<sim_id>/profiles` was read-only, so "edit or remove agents before the run" was not possible at all. Added `PUT` on the same path, replacing the population in one atomic call. Verified against a genuinely prepared six-agent simulation: **20/20**, plus 24 unit tests, 30 more browser tests, and 30 Vitest cases for the rules the UI mirrors.
+
+**The whole population goes at once because that is what happens on disk.** `write_profiles()` rewrites `profiles.json`, `twitter.csv` and `reddit.json` together, regenerates usernames from names, and renumbers `user_id` — which is the list index, not an identity. A per-agent `PATCH` would be the same rewrite with a smaller body and a lost-update race between two editors. Each submitted entry carries the `user_id` it currently has so the server knows what it is replacing; anything absent is removed; order decides the new numbering. **The test that matters checks the CSV, not our own record** — an edit that reached `profiles.json` but not the file OASIS actually reads would describe the old population for the entire run.
+
+**Three fields are immutable, and the UI does not offer them.** `provenance` is the distinction the whole project rests on: whether an agent stands for someone the document named or is a plausible member of the crowd we invented. Relabelling a synthetic agent as `named` would put invented words in a real person's mouth in every report that followed, and nothing downstream could tell. The source links are the evidence for that claim, so they travel with it. A named agent's name is fixed too, because it ties the agent to a real entity in the graph. The server overwrites all four from what it has stored rather than trusting the body — so the UI renders them as facts with the reason beside them, because **offering an edit that is silently discarded is a worse failure than a refusal: it looks like it worked.**
+
+**Edits go through `PersonaProfile` — the same validation as generation.** An operator cannot type a persona the generator could not have produced.
+
+**Removal renumbers, and the UI says so before it happens.** Changes are staged locally and saved in one call, which matches the endpoint and means the consequence can be shown rather than discovered. After saving, the view reloads from disk rather than trusting its local copy: the server renumbers ids and regenerates usernames, so what is stored is not what was sent, and editing on top of a stale copy would target the wrong agents.
+
+**A bug the browser test found.** `save()` set its confirmation message and then called `load()`, which clears it — so the "Saved: N agents" line was wiped before it ever rendered. The save worked; only the acknowledgement was missing, which is exactly the kind of thing a passing API test never notices.
+
+**A test-isolation lesson worth recording.** These browser tests write to a real simulation, and two of them filled a fixed occupation string. The first run persisted it, so the second staged no change at all — and the failure read as "the UI stopped detecting edits" rather than "the test asserted its own leftovers". Tests that mutate shared state must not depend on the starting value.
 
 **Step 4: Stage 3 — simulation**
 Config review and edit, platform selection, round count, launch controls, and a live run view — progress bar, round counter, streaming action feed, per-agent activity.

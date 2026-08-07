@@ -509,3 +509,223 @@ def test_a_nonsense_timeout_is_refused(client, created):
                                   "/api/simulation/prepare"])
 def test_every_action_needs_a_sim_id(client, path):
     assert client.post(path, json={}).status_code == 404
+
+
+# --------------------------------------------------------------------------
+# Phase 9 Step 3 — editing the population before the run
+# --------------------------------------------------------------------------
+#
+# The population is written by write_profiles(), which renumbers user_id (it is
+# the list index), regenerates usernames from names, and rewrites both OASIS
+# files alongside our own record. An edit route that touched profiles.json
+# directly would leave the CSV OASIS actually reads describing the old
+# population, so every test here checks the files agree afterwards.
+
+FULL_PROFILES = [
+    {"user_id": 0, "username": "dawn_mercer", "name": "Dawn Mercer", "age": 51,
+     "occupation": "carpenter", "background": "Thirty years in the corridor.",
+     "provenance": "synthetic", "activity_level": "high",
+     "source_entity_uuid": None, "source_entity_type": None},
+    {"user_id": 1, "username": "jane_doe", "name": "Jane Doe", "age": 47,
+     "occupation": "councillor", "background": "Chairs the planning committee.",
+     "provenance": "named", "activity_level": "moderate",
+     "source_entity_uuid": "e-1", "source_entity_type": "Person"},
+    {"user_id": 2, "username": "ray_nkemelu", "name": "Ray Nkemelu", "age": 33,
+     "occupation": "bus driver", "background": "Drives the Eastgate route.",
+     "provenance": "synthetic", "activity_level": "low",
+     "source_entity_uuid": None, "source_entity_type": None},
+]
+
+
+@pytest.fixture
+def populated(client, created):
+    """A simulation with a real, writable population on disk."""
+    runtime = client.runtime
+    runtime.sims.save_config(created, SimulationConfig.model_validate(SCENARIO))
+    directory = runtime.sims.profiles_dir(created)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "profiles.json").write_text(json.dumps(FULL_PROFILES))
+    return created
+
+
+def stored_population(client, sim_id):
+    path = client.runtime.sims.profiles_dir(sim_id) / "profiles.json"
+    return json.loads(path.read_text())
+
+
+def put_population(client, sim_id, profiles):
+    return client.put(f"/api/simulation/{sim_id}/profiles",
+                      json={"profiles": profiles})
+
+
+def test_an_unchanged_population_round_trips(client, populated):
+    response = put_population(client, populated, FULL_PROFILES)
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["count"] == 3
+    assert body["named"] == 1 and body["synthetic"] == 2
+    assert body["removed"] == [] and body["renumbered"] is False
+
+
+def test_an_edit_is_stored(client, populated):
+    edited = [dict(p) for p in FULL_PROFILES]
+    edited[0]["occupation"] = "joiner"
+    edited[0]["activity_level"] = "low"
+    put_population(client, populated, edited)
+
+    stored = stored_population(client, populated)
+    assert stored[0]["occupation"] == "joiner"
+    assert stored[0]["activity_level"] == "low"
+
+
+def test_removing_an_agent_shrinks_the_population(client, populated):
+    response = put_population(client, populated, [FULL_PROFILES[0], FULL_PROFILES[2]])
+
+    body = response.get_json()
+    assert body["count"] == 2
+    assert body["removed"] == [1]
+    assert body["renumbered"] is True
+    assert [p["name"] for p in stored_population(client, populated)] == [
+        "Dawn Mercer", "Ray Nkemelu"]
+
+
+def test_USER_IDS_ARE_RENUMBERED_CONTIGUOUSLY_AFTER_A_REMOVAL(client, populated):
+    """user_id is the list index OASIS agents are built from; a gap would not
+    match the rows in the file it reads."""
+    put_population(client, populated, [FULL_PROFILES[0], FULL_PROFILES[2]])
+
+    assert [p["user_id"] for p in stored_population(client, populated)] == [0, 1]
+
+
+def test_THE_OASIS_FILES_ARE_REWRITTEN_TOO(client, populated):
+    """profiles.json is our record; the CSV is what OASIS actually reads."""
+    import csv
+
+    put_population(client, populated, [FULL_PROFILES[0], FULL_PROFILES[2]])
+
+    directory = client.runtime.sims.profiles_dir(populated)
+    with (directory / "twitter.csv").open() as handle:
+        rows = list(csv.DictReader(handle))
+    reddit = json.loads((directory / "reddit.json").read_text())
+
+    assert len(rows) == 2, "the CSV still describes the old population"
+    assert len(reddit) == 2
+    assert [int(r["user_id"]) for r in rows] == [0, 1]
+
+
+def test_removing_every_agent_is_refused(client, populated):
+    response = put_population(client, populated, [])
+    assert response.status_code == 400
+    assert "at least one agent" in response.get_json()["error"]
+
+
+def test_a_body_without_profiles_is_refused(client, populated):
+    assert client.put(f"/api/simulation/{populated}/profiles", json={}).status_code == 400
+
+
+# -- the immutable fields ---------------------------------------------------
+
+
+def test_PROVENANCE_CANNOT_BE_CHANGED(client, populated):
+    """Relabelling a synthetic agent as named would put invented words in a
+    real person's mouth in every report that followed."""
+    edited = [dict(p) for p in FULL_PROFILES]
+    edited[0]["provenance"] = "named"
+    put_population(client, populated, edited)
+
+    assert stored_population(client, populated)[0]["provenance"] == "synthetic"
+
+
+def test_a_named_agent_cannot_be_relabelled_synthetic(client, populated):
+    edited = [dict(p) for p in FULL_PROFILES]
+    edited[1]["provenance"] = "synthetic"
+    put_population(client, populated, edited)
+
+    assert stored_population(client, populated)[1]["provenance"] == "named"
+
+
+@pytest.mark.parametrize("field", ["source_entity_uuid", "source_entity_type"])
+def test_the_source_link_cannot_be_rewritten(client, populated, field):
+    edited = [dict(p) for p in FULL_PROFILES]
+    edited[1][field] = "something-else"
+    put_population(client, populated, edited)
+
+    assert stored_population(client, populated)[1][field] == FULL_PROFILES[1][field]
+
+
+def test_A_NAMED_AGENT_CANNOT_BE_RENAMED(client, populated):
+    """The name ties the agent to a real entity in the graph."""
+    edited = [dict(p) for p in FULL_PROFILES]
+    edited[1]["name"] = "Someone Else"
+    put_population(client, populated, edited)
+
+    assert stored_population(client, populated)[1]["name"] == "Jane Doe"
+
+
+def test_a_synthetic_agent_can_be_renamed(client, populated):
+    edited = [dict(p) for p in FULL_PROFILES]
+    edited[0]["name"] = "Dawn Merriman"
+    put_population(client, populated, edited)
+
+    stored = stored_population(client, populated)
+    assert stored[0]["name"] == "Dawn Merriman"
+    assert stored[0]["username"] != "dawn_mercer", "the username follows the name"
+
+
+# -- refusals ---------------------------------------------------------------
+
+
+def test_an_unknown_agent_is_refused_rather_than_invented(client, populated):
+    response = put_population(client, populated, [
+        *FULL_PROFILES, {**FULL_PROFILES[0], "user_id": 99, "name": "Ghost"}])
+
+    assert response.status_code == 400
+    assert "No agent 99" in response.get_json()["error"]
+
+
+def test_a_duplicated_agent_is_refused(client, populated):
+    response = put_population(client, populated, [FULL_PROFILES[0], FULL_PROFILES[0]])
+    assert response.status_code == 400
+    assert "more than once" in response.get_json()["error"]
+
+
+def test_an_entry_without_a_user_id_is_refused(client, populated):
+    entry = {k: v for k, v in FULL_PROFILES[0].items() if k != "user_id"}
+    response = put_population(client, populated, [entry])
+    assert response.status_code == 400
+    assert "user_id" in response.get_json()["error"]
+
+
+def test_AN_EDIT_GOES_THROUGH_THE_SAME_VALIDATION_AS_GENERATION(client, populated):
+    """An operator must not be able to type a persona the generator could not
+    have produced."""
+    edited = [dict(p) for p in FULL_PROFILES]
+    edited[0]["age"] = "not a number at all"
+    response = put_population(client, populated, edited)
+
+    assert response.status_code == 400
+    assert "Agent 0 is not valid" in response.get_json()["error"]
+
+
+def test_an_unprepared_simulation_has_no_population_to_edit(client, created):
+    response = put_population(client, created, FULL_PROFILES)
+    assert response.status_code == 409
+
+
+def test_A_RUNNING_SIMULATION_REFUSES_POPULATION_EDITS(client, populated):
+    client.runtime.manager.start(populated)
+    response = put_population(client, populated, FULL_PROFILES)
+
+    assert response.status_code == 409
+    assert "running" in response.get_json()["error"]
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_a_finished_simulation_has_a_frozen_population(client, populated, failed):
+    client.runtime.sims.mark_started(populated)
+    client.runtime.sims.mark_finished(populated, failed=failed)
+    response = put_population(client, populated, FULL_PROFILES)
+
+    assert response.status_code == 409
+    assert "frozen" in response.get_json()["error"]

@@ -544,6 +544,124 @@ def profiles_of(sim_id: str):
     return jsonify({"sim_id": sim_id, "count": len(profiles), "profiles": profiles})
 
 
+#: Fields an operator may never change, and why.
+#:
+#: `provenance` is the distinction the whole project rests on — whether an
+#: agent stands for someone the document actually named, or is a plausible
+#: member of the crowd we invented. Relabelling a synthetic agent as `named`
+#: would put invented words in a real person's mouth in every report that
+#: followed, and nothing downstream could tell.
+#:
+#: The source links are the evidence for that claim, so they travel with it.
+IMMUTABLE_FIELDS = ("provenance", "source_entity_uuid", "source_entity_type")
+
+
+@control.put("/<sim_id>/profiles")
+def replace_profiles(sim_id: str):
+    """Replace the population: edits and removals in one atomic write.
+
+    The whole population arrives at once because that is what actually happens
+    on disk — `write_profiles` rewrites profiles.json and both OASIS files
+    together, and renumbers `user_id`, which is the list index. A per-agent
+    edit would be the same rewrite with a smaller body and a lost-update race.
+
+    Each submitted entry carries the `user_id` it currently has, so the server
+    can find what it is replacing and hold the immutable fields to their
+    stored values. Anything absent from the body is removed. Order decides the
+    new numbering.
+
+    Adding an agent is not supported here: a new persona is generated, not
+    typed, so an unknown `user_id` is refused rather than invented.
+    """
+    import json as _json
+
+    from app.services.oasis_profiles import write_profiles
+    from app.services.profile_generator import PersonaProfile
+
+    runtime = get_runtime()
+    meta = runtime.sims.load_meta(sim_id)
+
+    if runtime.manager.is_running(sim_id):
+        return _error(f"Simulation {sim_id} is running; stop it first", 409)
+    if meta.locked:
+        return _error(
+            f"Simulation {sim_id} is {meta.state} and its population is frozen", 409)
+
+    path = runtime.sims.profiles_dir(sim_id) / "profiles.json"
+    if not path.is_file():
+        return _error(f"Simulation {sim_id!r} has no population yet", 409)
+    try:
+        stored = _json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        return _error(f"Unreadable population file: {exc}", 500)
+
+    payload = _body()
+    submitted = payload.get("profiles")
+    if not isinstance(submitted, list):
+        return _error("Send {\"profiles\": [...]} with the population to keep", 400)
+    if not submitted:
+        return _error(
+            "A simulation needs at least one agent; removing every agent would "
+            "leave nothing to run", 400)
+
+    by_id = {int(entry["user_id"]): entry for entry in stored if "user_id" in entry}
+    seen: set[int] = set()
+    profiles: list[PersonaProfile] = []
+
+    for position, entry in enumerate(submitted):
+        if not isinstance(entry, dict) or "user_id" not in entry:
+            return _error(
+                f"Entry {position} has no user_id; every entry must say which "
+                "agent it replaces", 400)
+        try:
+            user_id = int(entry["user_id"])
+        except (TypeError, ValueError):
+            return _error(f"Entry {position} has a non-numeric user_id", 400)
+
+        original = by_id.get(user_id)
+        if original is None:
+            return _error(
+                f"No agent {user_id} in this population. Agents cannot be added "
+                "here — a persona is generated, not typed.", 400)
+        if user_id in seen:
+            return _error(f"Agent {user_id} appears more than once", 400)
+        seen.add(user_id)
+
+        merged = {**original, **entry}
+        # Held to their stored values whatever the client sent.
+        for field in IMMUTABLE_FIELDS:
+            merged[field] = original.get(field)
+        if original.get("provenance") == "named":
+            # The name ties this agent to a real entity in the graph. Renaming
+            # it would leave the link pointing at someone else.
+            merged["name"] = original.get("name")
+
+        # Same validation as generation: an operator cannot introduce a persona
+        # the generator could not have produced.
+        try:
+            profiles.append(PersonaProfile.model_validate(merged))
+        except Exception as exc:  # noqa: BLE001 - reported to the caller
+            return _error(f"Agent {user_id} is not valid: {exc}", 400)
+
+    try:
+        bundle = write_profiles(profiles, runtime.sims.profiles_dir(sim_id))
+    except Exception as exc:  # noqa: BLE001 - reported to the caller
+        return _error(f"Could not write the population: {exc}", 400)
+
+    removed = sorted(set(by_id) - seen)
+    logger.info("Population of %s rewritten: %s, %d removed",
+                sim_id, bundle.summary(), len(removed))
+    return jsonify({
+        "sim_id": sim_id,
+        "count": bundle.count,
+        "named": bundle.named,
+        "synthetic": bundle.synthetic,
+        "removed": removed,
+        # user_id is the list index, so everything after a removal shifts.
+        "renumbered": bool(removed),
+    }), 200
+
+
 @control.get("/<sim_id>/status")
 def status_of(sim_id: str):
     """Live progress, straight from the worker over its control socket."""

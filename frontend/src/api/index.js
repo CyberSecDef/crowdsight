@@ -85,6 +85,18 @@ export const simulation = {
   summary: (simId) => get(`/simulation/${encodeURIComponent(simId)}`),
   profiles: (simId, query) =>
     get(`/simulation/${encodeURIComponent(simId)}/profiles`, query),
+
+  /**
+   * Replace the population: edits and removals in one atomic call.
+   *
+   * The whole population goes at once because that is what happens on disk —
+   * the server rewrites profiles.json and both OASIS files together and
+   * renumbers user_id, which is the list index. Every entry must carry the
+   * user_id it currently has, so the server knows what it is replacing;
+   * anything left out is removed.
+   */
+  replaceProfiles: (simId, profiles) =>
+    put(`/simulation/${encodeURIComponent(simId)}/profiles`, { profiles }),
   status: (simId) => get(`/simulation/${encodeURIComponent(simId)}/status`),
   budget: () => get('/simulation/budget'),
 
