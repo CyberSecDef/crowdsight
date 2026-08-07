@@ -793,8 +793,24 @@ Implemented in `backend/app/services/report_grounding.py` and wired into the age
 
 **Tests:** `tests/test_report_grounding.py` — 41 tests, mostly adversarial: reports that cite posts, agents and rounds which do not exist, and assertions that those claims do not survive.
 
-**Step 3: Report API and persistence**
+**Step 3: Report API and persistence** ✅
 Build `backend/app/api/report.py`: `POST /api/report/generate` (async, returns task ID), `GET /api/report/status/<task_id>`, `GET /api/report/<report_id>`, `GET /api/report/<report_id>/export` (Markdown and HTML). Persist reports under `data/reports/`.
+
+Implemented in `backend/app/api/report.py` and `backend/app/services/report_store.py`, plus `DELETE /api/report/<id>` and a listing. Verified by storing and exporting a genuine model-written report: 11/11 checks.
+
+**One source of truth.** A report is written once as JSON; Markdown and HTML are rendered from it on demand. Rendering at write time would freeze the presentation of documents that outlive several changes to the renderer — a report exported next year should read the way the current renderer reads.
+
+**Evidence sits with the claim.** Each finding is followed by a compact line naming the posts, agents and rounds it rests on, so checking a claim does not mean hunting through an appendix — and a finding with no evidence line is visible as such at a glance. A run can be reported on more than once (after more rounds, or with a larger tool budget), so reports carry their own chronologically-sortable ids rather than being keyed on the simulation.
+
+**The verification section is always rendered, including on a clean report.** A document that quietly dropped three fabricated claims looks identical to one that never made any, and omitting the section when clean would leave "verified and sound" indistinguishable from "never verified".
+
+**Everything rendered to HTML is escaped.** A report carries agent-written post content, and an agent can be persuaded to write whatever a prompt asks for. Verified with a report quoting `<script>alert(...)</script>` from an agent post: it renders as visible text and nothing reaches the parser. There is deliberately no raw or unescaped export mode, since one would exist only to undo this.
+
+**A run still in progress cannot be reported on** — a report on a live run describes a moment rather than the run, so it is refused with a `409`.
+
+**A bug the tests found:** `save(report, sim_id=...)` used `setdefault`, so an explicit simulation id was silently ignored whenever the report already carried one. A report saved against one run could be filed under another; the caller's id now wins.
+
+**Tests:** `tests/test_report_api.py` — 62 tests covering storage, path-traversal refusal, both renderers, and the escaping.
 
 **Step 4: Report test units**
 **Tests:** `tests/test_report_agent.py` — with a fixture run, a report generates containing all required sections; the tool-call budget is enforced; reflection rounds are capped.

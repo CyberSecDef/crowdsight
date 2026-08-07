@@ -24,6 +24,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 from app.api.graph import bp as graph_bp
+from app.api.report import bp as report_bp
 from app.api.simulation import bp as simulation_bp
 from app.api.simulation import control as simulation_control_bp
 from app.config import ConfigError, PerimeterWarning, get_config
@@ -58,6 +59,7 @@ def create_app() -> Flask:
     app.register_blueprint(graph_bp)
     app.register_blueprint(simulation_bp)
     app.register_blueprint(simulation_control_bp)
+    app.register_blueprint(report_bp)
 
     @app.errorhandler(404)
     def _not_found(_exc):
