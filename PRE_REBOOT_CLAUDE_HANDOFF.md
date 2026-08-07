@@ -14,10 +14,19 @@ what that one does not: operational state and working practice.
 
 ---
 
-## 1. Why the reboot
+## 1. Why the reboot — RESOLVED
 
-The host has an **NVIDIA driver/library version mismatch**, so the `ollama`
-container cannot start and no inference is possible.
+*Resolved 2026-08-07.* After rebooting, kernel module and driver are both at
+595.84, the GPU is visible inside the `ollama` container, both models survived in
+the volume, and live inference works. Both suites pass: 1351 unit, 62
+integration. The account below is kept because the failure surfaces as a
+confusing Docker mount error rather than a GPU one, and is worth recognising if
+it recurs.
+
+---
+
+The host had an **NVIDIA driver/library version mismatch**, so the `ollama`
+container could not start and no inference was possible.
 
 ```
 $ nvidia-smi
@@ -99,11 +108,17 @@ test units).
 | 9 | 0 of 7 | Vue frontend — nothing built, the largest remaining phase |
 | 10 | 0 of 5 | integration testing, egress verification, ops docs |
 
-### One verification is outstanding
+### ~~One verification is outstanding~~ — done after the reboot
 
-Step 3 was verified without inference because the GPU was already unavailable.
-Everything not needing the model was checked against real data (11/11), but the
-**live end-to-end generation path was not run**:
+*Resolved 2026-08-07.* The live end-to-end generation path was run and passed
+11/11: generation started asynchronously, the pipeline moved through scoring,
+writing and verification, **5 of 5 citations resolved with nothing dropped**, and
+both exports rendered correctly — evidence lines beside each claim
+(`*Evidence:* posts 4, 5; agents 0, 1; round 1`) and the verification section
+present. Phase 8 Step 3 is now fully verified.
+
+The commands below are kept because they are the quickest smoke check of the
+whole report path:
 
 ```bash
 # after the reboot, with the stack up
