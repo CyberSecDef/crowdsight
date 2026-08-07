@@ -1,0 +1,45 @@
+{
+  "_comment": [
+    "The canonical cases for to_identifier(), read by BOTH suites.",
+    "The ontology editor previews what a typed name will become before it is",
+    "submitted, which means the rule is implemented twice — once in Python at",
+    "app/services/ontology_generator.py and once in JavaScript at",
+    "frontend/src/api/ontology.js. Two implementations of one rule drift.",
+    "This file is the contract: backend/tests/test_ontology_generator.py and",
+    "frontend/tests/unit/ontology.spec.js both assert against it, so a change",
+    "to either side that is not a change to the other fails immediately."
+  ],
+  "entity": [
+    ["Person", "Person"],
+    ["person", "Person"],
+    ["Public Figure", "PublicFigure"],
+    ["public figure", "PublicFigure"],
+    ["publicFigure", "PublicFigure"],
+    ["PublicFigure", "PublicFigure"],
+    ["public-figure", "PublicFigure"],
+    ["public_figure", "PublicFigure"],
+    ["  Local  Authority  ", "LocalAuthority"],
+    ["council/committee", "CouncilCommittee"],
+    ["Ward 3", "Ward3"],
+    ["3rd sector", ""],
+    ["", ""],
+    ["   ", ""],
+    ["!!!", ""],
+    ["123", ""],
+    ["café society", "CafSociety"],
+    ["HTTPServer", "HTTPServer"],
+    ["planningApplication2024", "PlanningApplication2024"]
+  ],
+  "relationship": [
+    ["works for", "WORKS_FOR"],
+    ["WORKS_FOR", "WORKS_FOR"],
+    ["worksFor", "WORKS_FOR"],
+    ["works-for", "WORKS_FOR"],
+    ["chairs committee", "CHAIRS_COMMITTEE"],
+    ["  objects  to  ", "OBJECTS_TO"],
+    ["represents", "REPRESENTS"],
+    ["", ""],
+    ["!!!", ""],
+    ["123", ""]
+  ]
+}

@@ -9,6 +9,7 @@ a two-line transform handles.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import respx
@@ -84,6 +85,38 @@ def test_relationship_identifiers(raw, expected):
 
 def test_identifier_is_length_capped():
     assert len(to_identifier("a" * 200)) <= 63
+
+
+# --------------------------------------------------------------------------
+# The shared contract with the frontend
+# --------------------------------------------------------------------------
+#
+# Phase 9 Step 2's ontology editor shows what a typed name will become before
+# it is submitted, which means this rule is implemented twice — here, and in
+# frontend/src/api/ontology.js. Two implementations of one rule drift, and the
+# symptom would be a graph carrying type names the operator did not choose.
+# Both suites assert against the same fixture, so a change to either side that
+# is not a change to the other fails immediately.
+
+_CASES = json.loads(
+    (Path(__file__).parent / "fixtures" / "identifier_cases.json").read_text())
+
+
+@pytest.mark.parametrize(("raw", "expected"), [tuple(c) for c in _CASES["entity"]])
+def test_ENTITY_IDENTIFIERS_MATCH_THE_SHARED_CONTRACT(raw, expected):
+    assert to_identifier(raw) == expected
+
+
+@pytest.mark.parametrize(("raw", "expected"),
+                         [tuple(c) for c in _CASES["relationship"]])
+def test_RELATIONSHIP_IDENTIFIERS_MATCH_THE_SHARED_CONTRACT(raw, expected):
+    assert to_identifier(raw, upper_first=False) == expected
+
+
+def test_the_shared_contract_covers_both_kinds():
+    """A fixture that quietly lost its cases would pass vacuously."""
+    assert len(_CASES["entity"]) >= 15
+    assert len(_CASES["relationship"]) >= 8
 
 
 # --------------------------------------------------------------------------

@@ -222,13 +222,13 @@ that touches the internet outside provisioning, and it does so only during
 `docker compose build frontend` — the same category as pulling a base image. `npm ci`
 installs exactly what `frontend/package-lock.json` pins, and the resulting container
 carries a compiled bundle with no Node and no package manager, on the sealed network.
-Verify the shipped UI with `./scripts/verify_frontend.sh` (34 checks), which asserts among
+Verify the shipped UI with `./scripts/verify_frontend.sh` (36 checks), which asserts among
 other things that the bundle names no external host and that the container cannot reach
 one. The frontend also carries its own suites, run from `frontend/`:
 
 ```bash
-npm test              # 17 unit tests — the polling state machine, no services needed
-npm run test:e2e      # 10 browser tests — needs the stack up; npx playwright install chromium
+npm test              # 89 unit tests — polling, upload limits, ontology rules
+npm run test:e2e      # 24 browser tests — needs the stack up; npx playwright install chromium
 ```
 
 The browser tests run against the real gateway rather than a dev server, because the CSP,
@@ -440,7 +440,7 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 1468 tests: 1406 unit (no services, ~48s) and 62 integration against live
+The suite is 1498 tests: 1436 unit (no services, ~53s) and 62 integration against live
 Neo4j and Ollama (~2 min), including a real document upload driven through to a built
 graph, a real scenario derivation checked against the config schema, a three-agent
 two-round simulation driven end to end against local inference, a live run killed with

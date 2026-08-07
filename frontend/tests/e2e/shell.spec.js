@@ -13,7 +13,7 @@ import { expect, test } from '@playwright/test'
 const ROUTES = [
   { path: '/', heading: 'Projects' },
   { path: '/runs', heading: 'Run history' },
-  { path: '/graphs/new', heading: 'New graph' },
+  { path: '/graphs/new', heading: 'Build a graph' },
 ]
 
 /** Collect everything the browser complains about, so a test can assert none. */

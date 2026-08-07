@@ -130,6 +130,25 @@ check "the frontend is on the sealed network" $? "$networks"
 grep -q 'crowdsight_edge' <<<"$networks"; [ $? -ne 0 ]
 check "the frontend is NOT on the edge network" $? "only the gateway is"
 
+# --- the limits the UI enforces are the limits the server enforces ----------
+# A mirror that has drifted is worse than no mirror: the UI accepts a file, the
+# upload runs, and the refusal arrives late looking like a bug.
+drift=$(docker compose exec -T backend python -c "
+from app.config import get_config
+c = get_config()
+print(','.join(sorted(c.ALLOWED_EXTENSIONS)), c.MAX_CONTENT_LENGTH)
+" 2>/dev/null | tr -d '\r')
+server_ext=$(cut -d' ' -f1 <<<"$drift")
+server_max=$(cut -d' ' -f2 <<<"$drift")
+ui_ext=$(grep -oP "(?<=export const ALLOWED_EXTENSIONS = \[).*(?=\])" frontend/src/api/limits.js \
+    | tr -d " '" | tr ',' '\n' | sort | paste -sd,)
+ui_max=$(grep -oP '(?<=export const MAX_UPLOAD_BYTES = )[0-9_]+' frontend/src/api/limits.js | tr -d '_')
+
+[ "$server_ext" = "$ui_ext" ]
+check "THE UI ACCEPTS EXACTLY WHAT THE SERVER ACCEPTS" $? "server=$server_ext ui=$ui_ext"
+[ "$server_max" = "$ui_max" ]
+check "the upload size cap matches the server's" $? "server=$server_max ui=$ui_max"
+
 # --- the shapes the views actually read -------------------------------------
 # A field the UI reads and the API does not send renders as "unknown" or "—".
 # That looks broken rather than wrong, and no HTTP-level check catches it, so
