@@ -222,8 +222,17 @@ that touches the internet outside provisioning, and it does so only during
 `docker compose build frontend` — the same category as pulling a base image. `npm ci`
 installs exactly what `frontend/package-lock.json` pins, and the resulting container
 carries a compiled bundle with no Node and no package manager, on the sealed network.
-Verify the shipped UI with `./scripts/verify_frontend.sh`, which asserts among other
-things that the bundle names no external host and that the container cannot reach one.
+Verify the shipped UI with `./scripts/verify_frontend.sh` (29 checks), which asserts among
+other things that the bundle names no external host and that the container cannot reach
+one. The frontend also carries its own suites, run from `frontend/`:
+
+```bash
+npm test              # 17 unit tests — the polling state machine, no services needed
+npm run test:e2e      # 10 browser tests — needs the stack up; npx playwright install chromium
+```
+
+The browser tests run against the real gateway rather than a dev server, because the CSP,
+the cache headers and the history-mode fallback are all things a dev server papers over.
 
 ### Verifying nothing left your network
 

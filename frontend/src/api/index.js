@@ -23,10 +23,21 @@ export * from './states.js'
 // --------------------------------------------------------------------------
 
 export const graph = {
-  upload(files, fields = {}) {
+  /**
+   * Upload one document and start building its graph.
+   *
+   * The part is named `file`, singular, and the endpoint takes exactly one per
+   * request — sending `files` gets a 400 that says nothing arrived at all.
+   *
+   * `reviewOntology` stops the job after the ontology is proposed and parks the
+   * task as `awaiting_review`, so it can be edited before extraction runs.
+   * Extraction is the expensive stage and a wrong ontology wastes all of it.
+   */
+  upload(file, { graphId = '', reviewOntology = false } = {}) {
     const form = new FormData()
-    for (const file of files) form.append('files', file)
-    for (const [key, value] of Object.entries(fields)) form.append(key, value)
+    form.append('file', file)
+    if (graphId) form.append('graph_id', graphId)
+    if (reviewOntology) form.append('review_ontology', 'true')
     return post('/graph/upload', form)
   },
 

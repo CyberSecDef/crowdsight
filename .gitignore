@@ -41,3 +41,7 @@ npm-debug.log*
 .idea/
 .DS_Store
 *.swp
+
+# Playwright
+test-results/
+playwright-report/

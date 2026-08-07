@@ -851,6 +851,22 @@ Built in `frontend/`: three runtime dependencies (vue, vue-router, pinia), plain
 
 **`awaiting_review` is neither finished nor failing.** Ontology review parks a task deliberately and waits for a person, so the polling helper treats *settled* as terminal-or-parked; a poller that only knows "running or terminal" spins forever on a task nobody is working on. Worth noting that **Step 7 describes the polling state machine as idle → running → complete → error, which omits this state** — the parked case is real and the tests for it should cover four outcomes, not three. Polling also backs off on error rather than dying on one hiccup after an hour of watching, gives up immediately on a 404 or a refusal since neither fixes itself, and pauses while the tab is hidden — a run takes hours, and polling every 1.5 seconds into a background tab all afternoon is pure waste.
 
+#### Follow-up review of Step 1
+
+The four things above were re-examined against the running stack, and Playwright and Vitest were brought forward from Step 7 to do it properly. Verification is now **29 HTTP-level checks** (`scripts/verify_frontend.sh`), **17 unit tests** (`npm test`) and **10 browser tests** (`npm run test:e2e`). Two more real defects surfaced.
+
+**The security headers were only ever on the frontend's own responses.** They are present on every UI route — `/`, a deep link, `/index.html`, a 404 asset — and that is now asserted per path rather than on `/` alone. But `/api/` is proxied by the *gateway*, which the frontend's nginx never touches, and it was setting nothing at all: no `nosniff`, no CSP, and a `Server: nginx/1.27.5` version banner. The gateway now sets them on both `:8080/api/` and the direct `:5000` listener. **`nosniff` is the one that matters**, because `/api/report/<id>/export?format=html` returns a document built around agent-written post content — escaped at the renderer, but a browser that MIME-sniffs its way to a different content type is a second chance at the same mistake. The export is self-contained (one `<style>` block, no scripts, no external references), so it takes `default-src 'none'; style-src 'unsafe-inline'` exactly, which leaves JSON responses maximally constrained too.
+
+**A trap worth recording: a single-file bind mount pins to an inode.** Editing `docker/gateway/nginx.conf` in a way that replaces the file leaves the container reading the *old* one — `nginx -t` passes, `nginx -s reload` reports success, and nothing changes. It needs `docker compose up -d --force-recreate gateway`. This is the same family as the `docker compose cp` overlay trap already recorded, and it fails just as quietly.
+
+**A second shape bug, in the one call the next step depends on.** `graph.upload()` sent its documents as `files`, plural and repeated. The endpoint takes `file`, singular, one per request, and answers anything else with a 400 saying nothing arrived. Stage 1's very first action would have failed. It was found by driving a real upload rather than by reading, which is the same lesson as the `state`/`status` mismatch: **the client's idea of the contract is not evidence about the contract.**
+
+**The UI does render, and it renders real data.** Playwright drives every route against the sealed stack and asserts the app mounts, no uncaught exceptions, no console errors, no failed requests and no CSP violations — then asserts the *content*: graph ids match `g-[0-9a-f]+`, and every run state is one of `draft`/`running`/`complete`/`failed` rather than the "unknown" that a wrong field name produces. That last check is the one that would have caught the original bug, and no HTTP-level check can: a view reading a field that does not exist still returns 200 and still paints.
+
+**`awaiting_review` was confirmed by driving it, not by reading the code.** A real document uploaded with `review_ontology=true` parks at status `awaiting_review`, stage `ontology_review`, progress `0.5`, and stays there indefinitely. Three flows park (ontology review, scenario review, and prepare), and the task runner explicitly declines to overwrite a parked task with `succeeded` — that is correct and now has a test. The frontend's machine is covered by 17 Vitest cases including that a parked task stops the poll, that it reports as parked rather than finished, that a failed task *resolves* rather than throws (the message is the thing worth showing), and that a 404 or a refusal gives up on the first attempt instead of retrying something that will never change.
+
+**One gap left open deliberately.** `tests/test_network_isolation.py` covers the backend and the gateway but has no case for the frontend container, which is new. The properties hold — it publishes no ports, has no default route, sits on the sealed network and not on the edge one, and is refused when it reaches for the npm registry — and `scripts/verify_frontend.sh` asserts all four. **Phase 10 Step 2 should fold them into the compliance gate**, which is where a release blocker belongs.
+
 **Step 2: Stage 1 — graph build**
 Upload UI (drag-drop, type and size validation client-side), ontology review and edit, extraction progress, and an interactive graph visualisation (Cytoscape.js or vis-network) with type filtering and node inspection.
 
@@ -869,6 +885,8 @@ Interview UI: pick an agent (or all), ask a question, view responses, browse int
 **Step 7: Frontend test units**
 **Tests:** component tests with Vitest for upload validation, config form validation, and polling state machines (idle → running → complete → error). One Playwright end-to-end test walking upload → graph → profiles → short run → report against a live sealed stack.
 
+**Correction, from Step 1:** the polling state machine has **four** end states, not three. `awaiting_review` is a real backend status — ontology review, scenario review and prepare all park a task and wait for a person — confirmed live, sitting at progress 0.5 indefinitely. Vitest and Playwright were installed during Step 1's follow-up review, and the polling machine already has 17 cases and the shell 10 browser tests; this step extends them rather than starting from nothing.
+
 ---
 
 ### Phase 10: Integration testing, egress verification, and operations
@@ -877,7 +895,7 @@ Interview UI: pick an agent (or all), ask a question, view responses, browse int
 `tests/test_e2e_pipeline.py` — a fixture document runs the complete pipeline end to end (upload → graph → profiles → config → 3-agent/2-round simulation → report) against real local services. Marked `integration`, run before every release.
 
 **Step 2: Egress verification suite**
-`tests/test_egress_verification.py` — the compliance gate. Assert the backend container has no route off-host; assert config validation rejects external URLs; assert no source file contains a non-allowlisted URL literal (grep the tree for `http(s)://` and diff against the allowlist); optionally capture traffic during a short run and assert every destination is in the allowlist. **Treat a failure here as a release blocker, not a warning.**
+`tests/test_egress_verification.py` — the compliance gate. **Include the frontend container**, which `test_network_isolation.py` does not yet cover: it publishes no ports, has no default route, is on the sealed network and not the edge one, and is refused when it reaches for the npm registry. `scripts/verify_frontend.sh` asserts all four today, but a release blocker belongs in the gate. Assert the backend container has no route off-host; assert config validation rejects external URLs; assert no source file contains a non-allowlisted URL literal (grep the tree for `http(s)://` and diff against the allowlist); optionally capture traffic during a short run and assert every destination is in the allowlist. **Treat a failure here as a release blocker, not a warning.**
 
 **Step 3: Performance baseline**
 Record wall-clock timings for a standard workload (50 agents, 10 rounds) on the target hardware. Store as a baseline so regressions are visible. Document expected duration prominently — users must know a real run takes hours, not minutes.

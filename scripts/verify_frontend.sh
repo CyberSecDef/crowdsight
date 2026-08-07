@@ -70,6 +70,31 @@ grep -q "default-src 'self'" <<<"$csp"; check "the CSP confines the page to its 
 grep -qE "https?://" <<<"$csp"; [ $? -ne 0 ]
 check "the CSP allowlists no external host" $?
 
+# Headers must be on every response the UI can produce, not just on /.
+# nginx's add_header does not merge across levels, so a location that sets any
+# header of its own silently drops the ones from the server block.
+for path in / /runs /simulations/sim-x/run /index.html /assets/nope.js; do
+    hdr=$(curl -sI "$BASE$path")
+    grep -qi 'content-security-policy' <<<"$hdr" \
+        && grep -qi 'x-content-type-options: nosniff' <<<"$hdr" \
+        && grep -qi 'referrer-policy' <<<"$hdr"
+    check "every security header is present on $path" $?
+done
+
+# The API is proxied by the gateway, which the frontend's headers never reach.
+# nosniff matters most: /api/report/<id>/export?format=html returns a document
+# built around agent-written content.
+for path in /api/health/live /api/simulation/list /api/report/nope; do
+    hdr=$(curl -sI "$BASE$path")
+    grep -qi 'x-content-type-options: nosniff' <<<"$hdr" \
+        && grep -qi 'content-security-policy' <<<"$hdr"
+    check "the API carries security headers on $path" $?
+done
+
+hdr=$(curl -sI "$BASE/api/health/live")
+grep -qiE '^server: nginx/[0-9]' <<<"$hdr"; [ $? -ne 0 ]
+check "the gateway does not announce its version" $? "$(grep -i '^server:' <<<"$hdr" | tr -d '\r')"
+
 # Nothing in the shipped bundle should name a host that is not ours.
 external=$(docker compose exec -T frontend sh -c \
     "grep -rhoE 'https?://[a-zA-Z0-9.-]+' /usr/share/nginx/html --include='*.js' --include='*.html' --include='*.css' 2>/dev/null \
