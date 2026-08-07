@@ -198,7 +198,9 @@ class ToolBox:
 
     def run(self, request: _ToolRequest) -> dict[str, Any]:
         if self.used >= self.budget:
-            return {"error": "The tool budget for this report is spent."}
+            # Sanitised like every other result. One shape out of this method
+            # means no caller can handle a path that skipped the sanitiser.
+            return _sanitise({"error": "The tool budget for this report is spent."})
         self.used += 1
 
         name = (request.tool or "").strip()
@@ -237,6 +239,17 @@ class ToolBox:
         return {"error": f"No such tool {name!r}"}
 
 
+def _defang(text: str) -> str:
+    """Stop run content closing the data block it is quoted inside.
+
+    Every place run data reaches a prompt goes through here — tool results, the
+    baseline evidence, and the follow-up. The baseline is the one that matters
+    most: tool results only exist if the model asks for them, but the baseline
+    posts are in every prompt this agent ever sends.
+    """
+    return text.replace("```", "'''")
+
+
 def _sanitise(result: Any) -> dict[str, Any]:
     """Make a tool result safe and small enough to put in a prompt.
 
@@ -255,7 +268,7 @@ def _sanitise(result: Any) -> dict[str, Any]:
     truncated = len(text) > MAX_TOOL_RESULT_CHARS
     if truncated:
         text = text[:MAX_TOOL_RESULT_CHARS]
-    text = text.replace("```", "'''")
+    text = _defang(text)
     return {"data": text, "truncated": truncated,
             "note": ("Result truncated; ask for a smaller limit if you need more."
                      if truncated else "")}
@@ -421,7 +434,7 @@ class ReportAgent:
                 rounds=len([r for r in timeline if not r["seed"]]),
                 agents=agents_total,
                 event=getattr(sim_config, "event", "") or "(not recorded)",
-                bundle=json.dumps(bundle, indent=2, default=str)[:20_000],
+                bundle=_defang(json.dumps(bundle, indent=2, default=str))[:20_000],
                 remaining=tools.remaining,
                 tools=tools.describe(),
             )},
@@ -476,7 +489,8 @@ class ReportAgent:
             messages.append({"role": "assistant", "content": json.dumps(
                 {"tool_requests": [r.model_dump() for r in requests]})})
             messages.append({"role": "user", "content": FOLLOW_UP.format(
-                results=json.dumps(results, indent=2)[:MAX_TOOL_RESULT_CHARS * 2],
+                results=_defang(
+                    json.dumps(results, indent=2))[:MAX_TOOL_RESULT_CHARS * 2],
                 remaining=tools.remaining,
                 reflections=self.reflection_rounds - reflections)})
 
