@@ -759,8 +759,24 @@ All three files exist and pass. `test_monitoring_api.py` and `test_interview.py`
 
 ### Phase 8: Report generation
 
-**Step 1: Report agent**
+**Step 1: Report agent** ✅
 Build `backend/app/services/report_agent.py`. Given a completed run, produce a structured analytical report: executive summary, sentiment trajectory across rounds, dominant narratives and counter-narratives, influential agents and how influence propagated, notable emergent behaviour, and explicit caveats. Give the agent read-only tools over the run data (query posts, aggregate sentiment, fetch agent history) with a bounded tool-call budget (default 5) and bounded reflection rounds (default 2) — unbounded agent loops on a local 14b model are a reliable way to burn an afternoon.
+
+Implemented in `backend/app/services/report_agent.py`, with sentiment scoring in `backend/app/services/sentiment.py`. Verified against a real completed run: 16/16 checks, producing a grounded narrative that cited specific posts, agents and rounds.
+
+**The numbers come from SQL; the model writes prose about them.** The timeline, per-round action counts, most-engaged posts, influential agents and the sentiment trajectory are all computed before the model is asked anything, and attached to the report afterwards regardless of what it wrote. It cannot get them wrong, and a report is never weaker than its baseline data even if the model uses its tools badly. Five tool calls is not enough for a 14b model to explore a run from nothing; it is plenty to follow up an interesting round.
+
+**Both budgets are hard, and the tool budget lives in the toolbox rather than the loop.** A budget checked by the caller is one refactor away from not being a budget. An agent that only ever asks for more evidence is stopped and the report fails loudly rather than the loop quietly granting another round.
+
+**Sentiment had to become a measurement.** Nothing scored sentiment before this step, and "opinion hardened between rounds three and five" is either backed by a number per round or it is the model's prior assumption wearing a chart. Posts are scored once by the local model and stored in the run's own database, so cost scales with posts rather than with how often a report is asked for, and a report regenerated later gets the same numbers. A word-list scorer was the cheaper option and the wrong one: these runs produce hedged civic language — *"I appreciate the need for housing but am concerned about the consultation period"* — which word-counting scores at roughly zero, and that is exactly the nuance a report exists to surface.
+
+**A post that could not be scored is recorded as unscored, never neutral.** Zero means balanced; absent means unknown, and averaging the second into the first pulls every trajectory toward the middle. The trajectory reports how many posts each round's figure rests on, because a mean over two posts and a mean over two hundred read identically otherwise.
+
+**Two problems the real run exposed, both invisible in a fixture.** The first pass scored only 1 of 11 posts: a small model routinely answers for part of a batch, and the unanswered posts were then cached as permanently unscored, leaving two of three rounds with no sentiment at all. Unscored posts are now retried in smaller batches, where the model is far more reliable. The second was reposts — OASIS writes them as rows with empty content pointing at the original, so there was nothing to score, and they were silently dropped. But amplifying a post is the clearest agreement the platform offers, and leaving reposts out understates precisely the spread a trajectory exists to show; a repost now inherits the sentiment of what it amplifies, while a quote is scored on its own words. Together these took the same run from 1 of 11 posts scored to 11 of 11, and produced a real trajectory: **-0.43 → -0.32 → -0.03**, opinion softening across the run.
+
+**Scale caveats are computed rather than requested.** The model is asked for caveats and usually gives them, but "usually" is not a property: a run with two agents always says so, in the caveats, with the numbers that make it obvious.
+
+**Tool results are sanitised before they reach the prompt.** Truncated to a bound rather than silently cut, and any fence that could close the data block is defanged — post text is written by agents, and an agent that has been told to write "ignore your instructions" must not have that read as one.
 
 **Step 2: Grounding and citation**
 Every claim in the report must cite the underlying data — specific post IDs, agent IDs, round numbers. A simulation report that cannot be traced back to simulated evidence is indistinguishable from the model's prior assumptions, which defeats the purpose.
