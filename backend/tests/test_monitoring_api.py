@@ -723,6 +723,57 @@ def test_a_posts_reply_count_comes_from_the_comments(reader):
     assert first["engagement"] == 4, "three likes and a reply"
 
 
+# --------------------------------------------------------------------------
+# Phase 9 Step 5 — fetching the posts a report cites
+# --------------------------------------------------------------------------
+#
+# A report's citations name post ids and nothing else. Without a filter for
+# them a UI can only guess which page a cited post is on, and on a run with
+# thousands of posts it guesses wrong and the citation link quietly does
+# nothing — which looks exactly like a report that cited something imaginary.
+
+
+def test_POSTS_CAN_BE_FETCHED_BY_ID(reader):
+    ids = [p["post_id"] for p in reader.posts(order="oldest")["posts"]][:2]
+    result = reader.posts(post_ids=ids)
+
+    assert sorted(p["post_id"] for p in result["posts"]) == sorted(ids)
+    assert result["total"] == len(ids)
+
+
+def test_fetching_one_post_by_id_returns_only_that_post(reader):
+    wanted = reader.posts(order="oldest")["posts"][0]["post_id"]
+    result = reader.posts(post_ids=[wanted])
+
+    assert [p["post_id"] for p in result["posts"]] == [wanted]
+
+
+def test_a_post_id_that_does_not_exist_returns_nothing_not_everything(reader):
+    """A missing filter would return the whole run, and the citation link would
+    open an unrelated post."""
+    assert reader.posts(post_ids=[999_999])["total"] == 0
+
+
+def test_an_empty_id_list_returns_nothing_rather_than_everything(reader):
+    assert reader.posts(post_ids=[])["total"] == 0
+
+
+def test_a_post_id_filter_still_carries_the_full_post(reader):
+    wanted = reader.posts(order="oldest")["posts"][0]["post_id"]
+    post = reader.posts(post_ids=[wanted])["posts"][0]
+
+    for field in ("content", "username", "round", "engagement", "kind"):
+        assert field in post
+
+
+def test_post_ids_combine_with_the_other_filters(reader):
+    ids = [p["post_id"] for p in reader.posts()["posts"]]
+    result = reader.posts(post_ids=ids, agent=0)
+
+    assert result["posts"], "agent 0 wrote at least one of these"
+    assert all(p["user_id"] == 0 for p in result["posts"])
+
+
 def test_posts_are_classified_by_kind(reader):
     assert {p["kind"] for p in reader.posts()["posts"]} == {"original"}
 
@@ -803,6 +854,48 @@ def test_posts_over_http(client):
     body = client.get(f"/api/simulation/{client.sim_id}/posts").get_json()
     assert body["total"] == 3, "the seed plus one post each from two agents"
     assert all("engagement" in p for p in body["posts"])
+
+
+def test_POSTS_BY_ID_OVER_HTTP(client):
+    """`?post_ids=` is what a citation link actually calls."""
+    all_posts = client.get(f"/api/simulation/{client.sim_id}/posts").get_json()["posts"]
+    wanted = [p["post_id"] for p in all_posts][:2]
+
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/posts?post_ids={wanted[0]},{wanted[1]}"
+    ).get_json()
+
+    assert body["total"] == 2
+    assert sorted(p["post_id"] for p in body["posts"]) == sorted(wanted)
+
+
+def test_a_single_post_id_over_http(client):
+    wanted = client.get(
+        f"/api/simulation/{client.sim_id}/posts").get_json()["posts"][0]["post_id"]
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/posts?post_ids={wanted}").get_json()
+
+    assert [p["post_id"] for p in body["posts"]] == [wanted]
+
+
+def test_an_unknown_post_id_over_http_is_empty_not_everything(client):
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/posts?post_ids=999999").get_json()
+    assert body["total"] == 0
+
+
+def test_a_non_numeric_post_id_is_a_400_not_a_500(client):
+    response = client.get(f"/api/simulation/{client.sim_id}/posts?post_ids=abc")
+    assert response.status_code == 400
+
+
+def test_post_ids_may_be_space_separated_too(client):
+    wanted = [p["post_id"] for p in client.get(
+        f"/api/simulation/{client.sim_id}/posts").get_json()["posts"]][:2]
+    body = client.get(
+        f"/api/simulation/{client.sim_id}/posts?post_ids={wanted[0]}%20{wanted[1]}"
+    ).get_json()
+    assert body["total"] == 2
 
 
 def test_comments_over_http(client):

@@ -576,13 +576,29 @@ class RunReader:
         round_index: int | None = None,
         min_engagement: int = 0,
         population_only: bool = False,
+        post_ids: Sequence[int] | None = None,
     ) -> dict[str, Any]:
-        """Posts, with who wrote them, which round, and what they drew."""
+        """Posts, with who wrote them, which round, and what they drew.
+
+        ``post_ids`` fetches specific posts. A report's citations name post ids
+        and nothing else, so without this a UI can only guess at which page a
+        cited post is on — and on a run with thousands of posts it would guess
+        wrong and the citation link would quietly do nothing.
+        """
         where: list[str] = []
         params: list[Any] = []
         if agent is not None:
             where.append("user_id = ?")
             params.append(int(agent))
+        if post_ids is not None:
+            wanted = [int(p) for p in post_ids]
+            if not wanted:
+                return self._envelope(rows=[], total=0, limit=limit, offset=offset,
+                                      order=order, posts=[])
+            # Parameterised placeholders, not interpolation: these are ints by
+            # the time they get here, but the habit is what keeps it true.
+            where.append(f"post_id IN ({','.join('?' * len(wanted))})")
+            params.extend(wanted)
         window = self._round_range("post", round_index)
         if window:
             where.append("rowid > ? AND rowid <= ?")

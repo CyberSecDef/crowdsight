@@ -941,6 +941,10 @@ def posts(sim_id: str):
         agent = _optional_int_arg("agent")
         round_index = _optional_int_arg("round")
         min_engagement = _optional_int_arg("min_engagement") or 0
+        # `?post_ids=4,12` — what a report's citations actually name.
+        raw_ids = request.args.get("post_ids") or ""
+        parts = [p for p in raw_ids.replace(" ", ",").split(",") if p]
+        post_ids = [int(p) for p in parts] if parts else None
     except ValueError as exc:
         return _error(str(exc), 400)
 
@@ -948,6 +952,7 @@ def posts(sim_id: str):
         return jsonify(reader.posts(
             limit=limit, offset=offset, order=order, agent=agent,
             round_index=round_index, min_engagement=min_engagement,
+            post_ids=post_ids,
             population_only=request.args.get("population_only") in
             {"1", "true", "yes"}))
     except RunNotReadable as exc:

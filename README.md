@@ -227,8 +227,8 @@ other things that the bundle names no external host and that the container canno
 one. The frontend also carries its own suites, run from `frontend/`:
 
 ```bash
-npm test              # 146 unit tests — polling, limits, ontology, profile and scenario rules
-npm run test:e2e      # 59 browser tests — needs the stack up; npx playwright install chromium
+npm test              # 164 unit tests — polling, limits, ontology, profiles, scenario, influence
+npm run test:e2e      # 72 browser tests — needs the stack up; npx playwright install chromium
 ```
 
 The browser tests run against the real gateway rather than a dev server, because the CSP,
@@ -440,7 +440,7 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 1519 tests: 1457 unit (no services, ~48s) and 62 integration against live
+The suite is 1530 tests: 1468 unit (no services, ~49s) and 62 integration against live
 Neo4j and Ollama (~2 min), including a real document upload driven through to a built
 graph, a real scenario derivation checked against the config schema, a three-agent
 two-round simulation driven end to end against local inference, a live run killed with

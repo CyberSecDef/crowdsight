@@ -938,8 +938,18 @@ The stage indicator stopped unlocking stages 4 and 5, because the rewritten view
 
 **Test fixtures are now made, not scavenged.** Three suites had come to depend on leftover state, and each time the failure blamed the product: a parked task outliving its graph, a graph that was parked *and* already built, and `prepared` meaning the wrong thing. The live run test also consumes its simulation by running it to completion, so a scavenging suite would pass once and then skip itself for ever — reporting "nothing to test against" about a stack that works. `tests/e2e/support.js` provisions what it needs.
 
-**Step 5: Stage 4 — report**
+**Step 5: Stage 4 — report** ✅
 Rendered report with charts (sentiment over rounds, action distribution, influence graph), citation links that jump to the underlying post, and export buttons.
+
+Verified against a real generated report: **38 HTTP checks, 164 unit tests, 72 browser tests**. The report used for it resolved 9 of 9 citations with nothing dropped.
+
+**This step needed a backend addition too.** Citations name post ids and nothing else, and the posts endpoint filtered by agent, round and engagement — not by id. So "jump to the underlying post" was not possible: a UI could only guess which page a cited post was on, and on a run with thousands of posts it would guess wrong and the link would quietly do nothing, which looks exactly like a report citing something imaginary. `?post_ids=4,12` was added, mirroring the existing `action` type filter. **An empty id list returns nothing rather than everything**, which is the failure that would have opened an unrelated post.
+
+**The charts are inline SVG rather than a library.** Both are simple — a line over a handful of rounds and bars over a handful of action types — and SVG is inspectable in the DOM, so a browser test can assert the values instead of confirming a canvas exists. Two honesty details carried over from Phase 8: the sentiment line **breaks** where a round could not be scored, because plotting an unscored round as zero would read as "balanced" when it means "we do not know"; and points resting on fewer than three scored posts are drawn hollow, because a mean over two posts and a mean over two hundred otherwise look identical. The vertical scale is fixed at −1..1 rather than fitted, or a run that moved from −0.05 to 0.05 would look like a collapse in opinion.
+
+**The influence graph is derived from what agents did, not from what the report says.** Every repost and quote records the post it amplified, so an edge runs from the amplifier to whoever wrote the original — which is literally how influence propagated, and is what `influence_propagation` describes in prose. Deriving it means **the picture can disagree with the model**: an agent the report calls influential who neither amplified anyone nor was amplified is flagged, which drawing the report's own claims could never show. Self-amplification is dropped, since it says nothing about influence between agents, and an amplified post outside the page held is **counted as unresolved rather than drawn as an edge to nowhere**.
+
+**The verification section is rendered before the prose, not after it.** Phase 8 Step 3 established that it is always shown, including on a clean report; putting it first means a reader sees how much of the report survived checking before reading what it claims.
 
 **Step 6: Stage 5 — interaction**
 Interview UI: pick an agent (or all), ask a question, view responses, browse interview history.
