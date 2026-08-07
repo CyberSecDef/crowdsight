@@ -796,7 +796,7 @@ Implemented in `backend/app/services/report_grounding.py` and wired into the age
 **Step 3: Report API and persistence** ✅
 Build `backend/app/api/report.py`: `POST /api/report/generate` (async, returns task ID), `GET /api/report/status/<task_id>`, `GET /api/report/<report_id>`, `GET /api/report/<report_id>/export` (Markdown and HTML). Persist reports under `data/reports/`.
 
-Implemented in `backend/app/api/report.py` and `backend/app/services/report_store.py`, plus `DELETE /api/report/<id>` and a listing. Verified by storing and exporting a genuine model-written report: 11/11 checks.
+Implemented in `backend/app/api/report.py` and `backend/app/services/report_store.py`, plus `DELETE /api/report/<id>` and a listing. Verified by storing and exporting a genuine model-written report: 11/11 checks. The live end-to-end path — `POST /api/report/generate` through to Markdown and HTML export — was verified separately once the host's GPU was restored: 11/11, with 5 of 5 citations resolving.
 
 **One source of truth.** A report is written once as JSON; Markdown and HTML are rendered from it on demand. Rendering at write time would freeze the presentation of documents that outlive several changes to the renderer — a report exported next year should read the way the current renderer reads.
 
