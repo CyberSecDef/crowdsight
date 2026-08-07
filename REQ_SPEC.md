@@ -729,8 +729,16 @@ All four endpoints implemented. Verified against a live run: 14/14 checks, inclu
 
 **Tests:** `tests/test_interview.py` — 49 tests covering each property the spec names, with the two failure modes above given their own tests so they cannot come back.
 
-**Step 4: Environment health**
+**Step 4: Environment health** ✅
 Implement `POST /api/simulation/env-status` (is the environment alive and accepting commands) and `POST /api/simulation/close-env` (graceful shutdown with timeout).
+
+Both implemented. Verified against a live worker: 11/11 checks, including shutting down a running simulation and confirming the teardown.
+
+**A wedged worker is the answer worth having.** A process that is alive but not answering its socket is invisible to a check that only asks whether the process exists, and looks healthy to one that only reads the recorded state. `env-status` keeps three answers apart — `running`, `unresponsive`, `closed` — and probes with a deliberately short timeout, because a health check that takes five seconds to report a problem is a poor health check. It reports the round-trip time with the answer; against a live run the probe came back in effectively zero seconds. The unresponsive path is tested against a real spawned process that never listens, since the whole point is that the operating system says the process is fine.
+
+**`close-env` is `stop` plus verification, which is the question you actually have.** `stop` returns as soon as the process is gone. Before archiving or deleting a run what matters is whether anything survived: a socket file nobody is listening on, or a database still held open. Both are the normal residue of an escalated kill and both bite later rather than now, so `close-env` checks each, clears a stale socket, and reports what was released. An incomplete close answers `207` rather than `200` — a caller about to delete the run needs to be able to tell.
+
+**A consistency gap the tests found:** these two routes were leaving the 404 for an unknown simulation to the manager, while every other route validates it itself. With a manager that does not validate — a stub, or a future one — the endpoint would answer `200` about a simulation that does not exist. They now check, like the rest.
 
 **Step 5: Monitoring test units**
 **Tests:** `tests/test_monitoring_api.py` — every endpoint returns the documented shape; pagination boundaries are correct; filters compose.

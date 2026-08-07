@@ -1057,3 +1057,57 @@ def interview_history():
 
     return jsonify(history(runtime.sims.sim_dir(sim_id), agent=agent,
                            limit=limit, offset=offset, order=order))
+
+
+# ==========================================================================
+# Phase 7 Step 4 — environment health
+#
+# `env-status` answers "is it alive and taking commands", quickly enough to be
+# polled. `close-env` is `stop` plus the question you actually have before
+# archiving a run: was anything left behind?
+# ==========================================================================
+
+
+@control.post("/env-status")
+def env_status():
+    """Whether the environment is alive and accepting commands."""
+    runtime = get_runtime()
+    payload = _body()
+    sim_id = _sim_id_from(payload)
+    # Validated here rather than left to the manager, as every other route
+    # does: a 404 for an unknown simulation is the route's own contract.
+    runtime.sims.load_meta(sim_id)
+
+    timeout = payload.get("timeout")
+    try:
+        seconds = float(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        return _error("timeout must be a number of seconds", 400)
+    if seconds is not None and seconds <= 0:
+        return _error("timeout must be greater than zero", 400)
+
+    return jsonify(runtime.manager.env_status(
+        sim_id, **({"timeout": seconds} if seconds is not None else {})))
+
+
+@control.post("/close-env")
+def close_env():
+    """Shut the environment down and confirm it was released."""
+    runtime = get_runtime()
+    payload = _body()
+    sim_id = _sim_id_from(payload)
+    runtime.sims.load_meta(sim_id)
+
+    timeout = payload.get("timeout")
+    try:
+        seconds = float(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        return _error("timeout must be a number of seconds", 400)
+    if seconds is not None and seconds <= 0:
+        return _error("timeout must be greater than zero", 400)
+
+    result = runtime.manager.close_env(
+        sim_id, **({"timeout": seconds} if seconds is not None else {}))
+    # 200 when the environment is genuinely gone, 207 when something survived:
+    # a caller about to archive or delete the run needs to know the difference.
+    return jsonify(result), 200 if result["closed"] else 207

@@ -39,6 +39,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -69,6 +70,10 @@ WORKER_FILE = "worker.json"
 
 #: How long a graceful stop is given before SIGTERM, and SIGTERM before SIGKILL.
 GRACEFUL_STOP_SECONDS = 30.0
+
+#: A health probe answers quickly or not at all. Five seconds to learn that
+#: something is wrong is too slow for something meant to be polled.
+PROBE_TIMEOUT = 2.0
 SIGTERM_SECONDS = 10.0
 
 
@@ -388,6 +393,122 @@ class SimulationManager:
         if meta.state == SimulationState.RUNNING:
             self.store.mark_finished(sim_id, failed=failed)
         self._forget(sim_id)
+
+    # -- health -------------------------------------------------------------
+
+    def env_status(self, sim_id: str, *, timeout: float = PROBE_TIMEOUT) -> dict[str, Any]:
+        """Is the environment alive and accepting commands?
+
+        Deliberately short-timeout: a health check that takes five seconds to
+        report a problem is a poor health check, and this is meant to be polled
+        from a monitor. The three answers are genuinely different and are kept
+        apart — a wedged worker is neither running normally nor gone, and
+        collapsing it into either would hide the case worth knowing about.
+        """
+        meta = self.store.load_meta(sim_id)
+        record = self._load_record(sim_id)
+        alive = bool(record and record.alive())
+
+        payload: dict[str, Any] = {
+            "sim_id": sim_id,
+            "state": meta.state,
+            "process_alive": alive,
+            "pid": record.pid if record else None,
+            "socket": str(socket_path(self.store.sim_dir(sim_id))),
+        }
+
+        if not alive:
+            payload.update(status="closed", accepting_commands=False,
+                           detail="No process is holding this environment")
+            return payload
+
+        client = ControlClient(socket_path(self.store.sim_dir(sim_id)),
+                               timeout=timeout)
+        started = time.monotonic()
+        try:
+            answer = client.request("ping")
+        except IPCError as exc:
+            payload.update(
+                status="unresponsive", accepting_commands=False,
+                detail=f"Process {record.pid} is alive but did not answer "
+                       f"within {timeout}s: {exc}",
+                probe_seconds=round(time.monotonic() - started, 3),
+            )
+            return payload
+
+        payload.update(
+            status="running", accepting_commands=True,
+            detail="The environment answered",
+            probe_seconds=round(time.monotonic() - started, 3),
+            worker_pid=answer.get("pid") if isinstance(answer, dict) else None,
+        )
+        return payload
+
+    def close_env(self, sim_id: str, *,
+                  timeout: float = GRACEFUL_STOP_SECONDS) -> dict[str, Any]:
+        """Stop the run, then verify the environment was genuinely released.
+
+        ``stop`` returns as soon as the process is gone. This answers the
+        question you actually have before archiving or deleting a run: was
+        anything left behind? A socket file nobody is listening on, or a
+        database still held open, are the two that bite later.
+        """
+        meta = self.store.load_meta(sim_id)
+        outcome = self.stop(sim_id, timeout=timeout)
+
+        path = socket_path(self.store.sim_dir(sim_id))
+        record = self._load_record(sim_id)
+        leftovers: list[str] = []
+
+        if record is not None and record.alive():
+            leftovers.append(f"process {record.pid} is still running")
+        if path.exists():
+            # A killed worker never reaches its cleanup, so this is the normal
+            # residue of an escalated stop rather than a fault. Removed here so
+            # a later run on the same id does not trip over it.
+            with contextlib.suppress(OSError):
+                path.unlink()
+            if path.exists():
+                leftovers.append(f"control socket {path} could not be removed")
+
+        database = self.store.sim_dir(sim_id) / "simulation.db"
+        database_readable = self._database_released(database)
+        if database.exists() and not database_readable:
+            leftovers.append("the run database is still locked")
+
+        return {
+            "sim_id": sim_id,
+            "outcome": outcome,
+            "closed": not leftovers,
+            "state": self.store.load_meta(sim_id).state,
+            "was": meta.state,
+            "released": {
+                "process": not (record is not None and record.alive()),
+                "socket": not path.exists(),
+                "database": database_readable,
+            },
+            "leftovers": leftovers,
+        }
+
+    @staticmethod
+    def _database_released(path: Path) -> bool:
+        """True when the run's database can be opened and read.
+
+        A worker still holding a write transaction shows up here as a locked
+        database, which is the difference between "the process exited" and
+        "the environment is closed".
+        """
+        if not path.exists():
+            return True
+        try:
+            connection = sqlite3.connect(path, timeout=1.0)
+            try:
+                connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            return False
+        return True
 
     # -- restart ------------------------------------------------------------
 
