@@ -536,7 +536,7 @@ HTTP surface: `POST /api/simulations` (derive, returns a task to poll), `GET /ap
 
 ### Phase 6: Simulation execution engine
 
-**Step 1: OASIS integration with local inference**
+**Step 1: OASIS integration with local inference** ✅
 Build `backend/app/services/simulation_runner.py`. Instantiate the OASIS environment using CAMEL's `ModelFactory` bound to local Ollama:
 
 ```python
@@ -553,7 +553,7 @@ model = ModelFactory.create(
 
 This is the single most important integration point in the project: it is what keeps every one of the thousands of agent turns on local hardware. Verify it before building anything on top — a smoke test of three agents for two rounds, confirming via Ollama's logs that requests arrive locally.
 
-✅ Implemented in `backend/app/services/simulation_runner.py`. The smoke test passes: three agents, two rounds, real local inference, 30/30 checks.
+Implemented in `backend/app/services/simulation_runner.py`. The smoke test passes: three agents, two rounds, real local inference, 30/30 checks.
 
 **The binding is guarded, not merely written correctly.** `build_model()` has no `model_platform` parameter, so "no code path can construct a cloud model" is a property of the signature rather than a convention someone must remember. It also re-checks the URL through the same `classify_host` the configuration uses — defence in depth, since a caller could hold a `Config` mutated after validation. An empty URL is refused explicitly: with `url` unset, camel's `OllamaModel` falls back to `OLLAMA_BASE_URL` and then calls `_start_server()`, shelling out to an `ollama` binary this image does not contain.
 
@@ -573,12 +573,12 @@ This is the single most important integration point in the project: it is what k
 
 **Tests:** `tests/test_ollama_model_binding.py` (named in Step 6, written here because Step 1 says to verify before building on top) and `tests/test_simulation_runner.py`, including the `integration`-marked three-agent two-round smoke test.
 
-**Step 2: Process isolation and IPC**
+**Step 2: Process isolation and IPC** ✅
 Run each simulation in a separate OS process, not a thread. Runs are long, memory-heavy, and must be independently killable without taking down the API. Build `simulation_ipc.py` for control-plane messaging (status, stop, interview requests) over a queue or Unix socket, and `simulation_manager.py` to track PIDs, lifecycle state, and cleanup of orphaned processes on restart.
 
 **`simulation_manager` must divide the `LLM_CONCURRENCY` budget across the workers it spawns**, passing each its share via the environment. Phase 2's gate is per process, so without this three concurrent runs at 4 each put 12 requests in flight against one Ollama — precisely the GPU OOM the bound exists to prevent. The arithmetic is deliberately explicit rather than hidden behind a cross-process semaphore, whose blocking `acquire` would park one thread per waiting coroutine, hundreds of them during a 300-agent round. Reserve a share for the API process too, which still serves interviews while a run is in flight.
 
-✅ Implemented across `simulation_ipc.py`, `simulation_worker.py` and `simulation_manager.py`. Verified against real processes: 43/43 checks, plus a real two-agent simulation driven to completion inside a genuinely spawned worker and supervised over its socket (14/14).
+Implemented across `simulation_ipc.py`, `simulation_worker.py` and `simulation_manager.py`. Verified against real processes: 43/43 checks, plus a real two-agent simulation driven to completion inside a genuinely spawned worker and supervised over its socket (14/14).
 
 **The budget arithmetic**, with two new knobs, `MAX_CONCURRENT_SIMULATIONS` (default 2) and `API_LLM_RESERVE` (default 1):
 
