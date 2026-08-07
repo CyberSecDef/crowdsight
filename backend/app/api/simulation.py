@@ -603,3 +603,118 @@ def stop():
 def budget():
     """Where the inference budget went. An operator asks this when a run crawls."""
     return jsonify(get_runtime().manager.budget())
+
+
+# ==========================================================================
+# Phase 7 Step 1 — run status and timeline
+#
+# All four answer from the run's own database, so a finished run reads exactly
+# like a live one. Live worker fields enrich the status when there is a worker
+# to ask, and are marked stale rather than withheld when it does not answer.
+# ==========================================================================
+
+
+def _reader(sim_id: str):
+    """A reader for one run, after checking the simulation exists at all."""
+    from app.services.run_reader import RunReader
+
+    runtime = get_runtime()
+    runtime.sims.load_meta(sim_id)          # raises SimulationNotFound
+    return RunReader(runtime.sims.sim_dir(sim_id))
+
+
+def _live_status(sim_id: str) -> dict[str, Any] | None:
+    """The worker's own view, or None when there is no worker to ask."""
+    runtime = get_runtime()
+    try:
+        if not runtime.manager.is_running(sim_id):
+            return None
+        return runtime.manager.status(sim_id)
+    except Exception as exc:  # noqa: BLE001 - enrichment must never fail a poll
+        logger.debug("No live status for %s: %s", sim_id, exc)
+        return {"unreachable": str(exc)}
+
+
+def _range_arg(name: str) -> int | None:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number") from None
+
+
+@control.get("/<sim_id>/run-status")
+def run_status(sim_id: str):
+    """State, progress and cumulative action counts. Safe to poll."""
+    runtime = get_runtime()
+    meta = runtime.sims.load_meta(sim_id)
+    total_rounds = (runtime.sims.load_config(sim_id).rounds
+                    if runtime.sims.prepared(sim_id) else 0)
+    reader = _reader(sim_id)
+    return jsonify(reader.status(meta=meta, total_rounds=total_rounds,
+                                 live=_live_status(sim_id)))
+
+
+@control.get("/<sim_id>/run-status/detail")
+def run_status_detail(sim_id: str):
+    """The recent action log: what agents actually did, newest first."""
+    from app.services.run_reader import RunNotReadable
+
+    reader = _reader(sim_id)
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except ValueError:
+        return _error("limit must be a whole number", 400)
+
+    try:
+        actions = reader.recent_actions(limit=limit)
+    except RunNotReadable as exc:
+        return _error(str(exc), 409)
+    return jsonify({"sim_id": sim_id, "count": len(actions), "actions": actions})
+
+
+@control.get("/<sim_id>/timeline")
+def timeline(sim_id: str):
+    """Per-round aggregates, optionally over a range of rounds."""
+    reader = _reader(sim_id)
+    try:
+        first = _range_arg("from_round")
+        last = _range_arg("to_round")
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    if first is not None and last is not None and first > last:
+        return _error("from_round must not be greater than to_round", 400)
+
+    rounds = reader.timeline(from_round=first, to_round=last)
+    return jsonify({
+        "sim_id": sim_id,
+        "count": len(rounds),
+        "from_round": first,
+        "to_round": last,
+        "rounds": rounds,
+    })
+
+
+@control.get("/<sim_id>/agent-stats")
+def agent_stats(sim_id: str):
+    """Per-agent activity across the run, paginated and sortable."""
+    from app.services.run_reader import RunNotReadable
+
+    reader = _reader(sim_id)
+    try:
+        limit = int(request.args.get("limit") or 100)
+        offset = int(request.args.get("offset") or 0)
+    except ValueError:
+        return _error("limit and offset must be whole numbers", 400)
+
+    try:
+        return jsonify(reader.agent_stats(
+            limit=limit, offset=offset,
+            sort=str(request.args.get("sort") or "actions"),
+            population_only=request.args.get("population_only") in
+            {"1", "true", "yes"},
+        ))
+    except RunNotReadable as exc:
+        return _error(str(exc), 409)

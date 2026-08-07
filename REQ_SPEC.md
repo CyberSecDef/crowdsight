@@ -679,8 +679,20 @@ All six files exist and pass. Four were written as their steps landed — `test_
 
 ### Phase 7: Monitoring, data access, and agent interviews
 
-**Step 1: Run status and timeline endpoints**
+**Step 1: Run status and timeline endpoints** ✅
 Implement `GET /api/simulation/<id>/run-status` (state, current/total rounds, percent, action counts), `GET /api/simulation/<id>/run-status/detail` (recent action log), `GET /api/simulation/<id>/timeline` (per-round aggregates with optional range), `GET /api/simulation/<id>/agent-stats` (per-agent activity).
+
+All four implemented, reading through `backend/app/services/run_reader.py`. Verified against a real run driven end to end over HTTP: 18/18 checks.
+
+**Every endpoint answers from the run's own database, not from the worker.** Most of a run's life is *after* it ends — that is when the results are examined and a report is written — so the only source that always exists is what is on disk. One code path therefore serves a live run and a finished one alike, and the round boundaries recorded in Phase 6 Step 3 supply the attribution that OASIS never stamps on anything.
+
+**Live worker fields are an enrichment, never a dependency.** When the store says a run is in flight, the worker is asked for its current stage over the control socket. If it does not answer, the response still comes back — marked `live_stale` with the reason — rather than a poll hanging for as long as the worker is wedged. A UI polling every second must never be slower than its own interval. Confirmed in the real run: `preparing → running` appeared while it was live, and the same endpoint read the finished run with no worker at all.
+
+**The broadcaster is flagged, not counted as public.** It posts, so any naive per-agent aggregate makes it one of the loudest participants in the simulation. `agent-stats` marks it `population: false`, and `population_only=true` isolates the real crowd — the distinction Phase 6 Step 1 created it for. A silent agent is reported with a count of zero rather than omitted, because an agent that never acted is a finding rather than an absence.
+
+**Aggregation is done in SQL, over indexes we add.** OASIS indexes nothing but its primary keys, so per-agent counts over tens of thousands of rows meant a full scan of every table per request — too slow to poll. Nine indexes are created on first read: additive, idempotent, and skipped silently if the database is locked, since a slow query is a better outcome than a status poll failing because a round is mid-write. Reads use a busy timeout throughout, because OASIS is writing while they run.
+
+**The Phase 2 Cypher audit caught this code**, correctly by shape: Neo4j also has `CREATE INDEX ... ON`, and the index DDL interpolates its identifiers. SQL cannot parameterise a table name any more than Cypher can, so rather than silence the guard, the identifiers now go through a validator that refuses anything which is not a bare identifier — the same reasoning as `escape_identifier` in the Neo4j layer — and the statement carries the sanctioned exemption marker with that justification. The same treatment was applied to the ledger's generalised `rows_by_round` query.
 
 **Step 2: Content access endpoints**
 Implement paginated `GET /api/simulation/<id>/actions` (filter by platform, agent, round), `GET /api/simulation/<id>/posts`, `GET /api/simulation/<id>/comments` (optionally filtered by post). Enforce sane page limits — a large run holds tens of thousands of rows.

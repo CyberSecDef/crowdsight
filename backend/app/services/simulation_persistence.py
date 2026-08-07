@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,16 @@ __all__ = [
 ]
 
 ROUND_TABLE = "crowdsight_round"
+
+#: SQL cannot parameterise a table name. Every one used here comes from
+#: ROLLBACK_TABLES or a caller inside this package, and is checked before use.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _identifier(name: str) -> str:
+    if not _IDENTIFIER.match(name or ""):
+        raise ValueError(f"Not a usable SQL identifier: {name!r}")
+    return name
 
 #: Tables holding per-round activity, in dependency order for deletion.
 #:
@@ -312,6 +323,7 @@ class RunLedger:
         with self._connect() as connection:
             if table not in self._tables(connection):
                 return {}
+            table, id_column = _identifier(table), _identifier(id_column)
             rows = connection.execute(
                 f"SELECT rowid AS rid, {id_column} AS ident FROM {table}").fetchall()
 
