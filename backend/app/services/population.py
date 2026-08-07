@@ -236,18 +236,25 @@ Describe the affected population."""
 
 
 async def sketch_population(
-    ontology: Ontology,
+    ontology: Ontology | None,
     excerpt: str,
     llm: LLMClient,
     *,
     temperature: float = 0.4,
 ) -> PopulationSketch:
-    """Derive who the event affects, from the document."""
+    """Derive who the event affects, from the document.
+
+    ``ontology`` is optional: a graph built before ontologies were persisted,
+    or one whose file has been removed, still has a document worth sketching a
+    population from. It only enriches the prompt, so its absence costs
+    context rather than correctness.
+    """
     messages = [
         {"role": "system", "content": SKETCH_SYSTEM},
         {"role": "user", "content": SKETCH_USER.format(
-            domain=ontology.domain or "unspecified",
-            types=", ".join(t.name for t in ontology.entity_types) or "none",
+            domain=(ontology.domain if ontology else "") or "unspecified",
+            types=(", ".join(t.name for t in ontology.entity_types)
+                   if ontology else "") or "none",
             excerpt=excerpt[:6000],
         )},
     ]

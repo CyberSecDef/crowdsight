@@ -184,6 +184,18 @@ async def test_a_failed_sketch_falls_back_to_a_generic_crowd(config):
     assert result.stances and result.affected_groups
 
 
+@respx.mock
+async def test_a_sketch_works_without_an_ontology(config, sample_sketch):
+    """A graph with no ontology file still has a document worth sketching from."""
+    respx.post(CHAT).mock(return_value=chat_completion(
+        json.dumps(sample_sketch.model_dump())))
+    result = await sketch_population(
+        None, "A council approved a housing policy.",
+        LLMClient(config, retry_policy=RetryPolicy(max_attempts=1)),
+    )
+    assert result.stances
+
+
 def test_a_sketch_without_stances_is_rejected():
     with pytest.raises(Exception):
         PopulationSketch(stances=[])

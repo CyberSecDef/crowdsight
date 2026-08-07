@@ -280,6 +280,19 @@ class SimulationManager:
                 f"simulation(s), the configured maximum"
             )
 
+        # Checked here rather than only in the route handler. A rule enforced
+        # in one caller is a rule every other caller walks past, and the cost
+        # of finding out later is a spawned process that dies on a missing
+        # file with the run recorded as having started.
+        if not self.store.prepared(sim_id):
+            raise CapacityError(
+                f"Simulation {sim_id} has no config.json; prepare it before starting"
+            )
+        if not (self.store.profiles_dir(sim_id) / "profiles.json").is_file():
+            raise CapacityError(
+                f"Simulation {sim_id} has no population; prepare it before starting"
+            )
+
         sim_dir = self.store.sim_dir(sim_id)
         share = self.share
         # Passed through the environment, as the spec requires, so the worker
@@ -318,7 +331,12 @@ class SimulationManager:
         return {"sim_id": sim_id, "running": True, **snapshot}
 
     def stop(self, sim_id: str, *, timeout: float = GRACEFUL_STOP_SECONDS) -> str:
-        """Ask, then insist. Returns how it ended."""
+        """Ask, then insist. Returns how it ended.
+
+        Raises for a simulation that does not exist: stopping a typo should
+        say so rather than report success.
+        """
+        self.store.load_meta(sim_id)
         record = self._load_record(sim_id)
         if record is None or not record.alive():
             self._reconcile_finished(sim_id)

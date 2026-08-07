@@ -299,22 +299,39 @@ class RunLedger:
 
     # -- attribution --------------------------------------------------------
 
-    def posts_by_round(self) -> dict[int, list[int]]:
-        """Which posts belong to which round, from the recorded boundaries."""
+    def rows_by_round(self, table: str, id_column: str) -> dict[int, list[int]]:
+        """Which rows of ``table`` belong to which round.
+
+        The general form of round attribution: OASIS stamps no round on
+        anything, so a row's round is the one whose recorded rowid range
+        contains it. Posts, comments and traces all work this way.
+        """
         records = self.rounds()
         if not records or not self.path.is_file():
             return {}
         with self._connect() as connection:
-            if "post" not in self._tables(connection):
+            if table not in self._tables(connection):
                 return {}
             rows = connection.execute(
-                "SELECT rowid AS rid, post_id FROM post").fetchall()
+                f"SELECT rowid AS rid, {id_column} AS ident FROM {table}").fetchall()
 
         out: dict[int, list[int]] = {}
         previous = 0
         for record in records:
-            mark = record.marks.get("post", previous)
-            out[record.round] = [int(r["post_id"]) for r in rows
+            mark = record.marks.get(table, previous)
+            out[record.round] = [int(r["ident"]) for r in rows
                                  if previous < int(r["rid"]) <= mark]
             previous = mark
         return out
+
+    def posts_by_round(self) -> dict[int, list[int]]:
+        """Which posts belong to which round, from the recorded boundaries."""
+        return self.rows_by_round("post", "post_id")
+
+    def comments_by_round(self) -> dict[int, list[int]]:
+        """Which comments belong to which round."""
+        return self.rows_by_round("comment", "comment_id")
+
+    def actions_by_round(self) -> dict[int, list[int]]:
+        """Which trace rows — that is, which agent actions — belong to which round."""
+        return self.rows_by_round("trace", "rowid")

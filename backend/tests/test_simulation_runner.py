@@ -17,7 +17,6 @@ two rounds, real local inference.
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
@@ -246,69 +245,9 @@ def test_the_population_is_empty_before_setup(runner):
 
 
 # --------------------------------------------------------------------------
-# The smoke test Step 1 asks for
+# The smoke test lives in tests/test_simulation_smoke.py
+#
+# Step 1 asked for a three-agent, two-round run against real inference and it
+# was written here. Step 6 names `test_simulation_smoke.py` as its home, so it
+# moved there rather than existing twice under two names.
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-async def test_three_agents_two_rounds_against_local_ollama(integration_config, tmp_path):
-    """Step 1's stated acceptance criterion, end to end.
-
-    Proves the whole chain: the local binding answers, OASIS builds a
-    population from the files Phase 4 wrote, the broadcaster seeds the event,
-    agents take real turns against local inference, and it all lands in the
-    run's own database.
-    """
-    import sqlite3
-
-    from app.services.oasis_profiles import write_profiles
-    from app.services.profile_generator import PersonaProfile
-
-    people = [
-        PersonaProfile(name="Dawn Mercer", age=41, occupation="carpenter",
-                       activity_level="high", gender="female",
-                       country="United Kingdom",
-                       background="Runs a small joinery business."),
-        PersonaProfile(name="Ray Nkemelu", age=33, occupation="bus driver",
-                       activity_level="high", gender="male",
-                       country="United Kingdom",
-                       background="Drives the Eastgate route."),
-        PersonaProfile(name="Ursula Ferreira", age=67, occupation="full-time carer",
-                       activity_level="high", gender="female",
-                       country="United Kingdom",
-                       background="Has lived on the corridor for forty years."),
-    ]
-    profiles = tmp_path / "profiles"
-    write_profiles(people, profiles, default_country="United Kingdom")
-
-    config = SimulationConfig.model_validate({**SCENARIO, "rounds": 2})
-    config.scheduled_events[0].enabled = True
-
-    runner = SimulationRunner(config, profiles, tmp_path / "sim.db",
-                              config=integration_config, rng_seed=3)
-    try:
-        await runner.setup()
-
-        assert len(runner.population()) == 3
-        assert runner.broadcaster is not None
-        assert runner.env.llm_semaphore._value == integration_config.LLM_CONCURRENCY
-        assert os.environ["OASIS_DB_PATH"] == str(runner.database_path)
-
-        summaries = await runner.run(rounds=2)
-    finally:
-        await runner.close()
-
-    assert len(summaries) == 3, "a seed round plus two rounds"
-    assert summaries[2].events_fired == 1, "the enabled event fired in its round"
-    assert sum(s.invoked for s in summaries[1:]) > 0, "agents took real turns"
-
-    connection = sqlite3.connect(runner.database_path)
-    users = connection.execute("SELECT user_id, user_name FROM user").fetchall()
-    posts = connection.execute("SELECT user_id, content FROM post").fetchall()
-    connection.close()
-
-    assert len(users) == 4, "three agents and the broadcaster"
-    assert all(name for _, name in users), "OASIS would sign these up as NULL"
-    assert any("density policy" in (c or "") for _, c in posts), "the seed post"
-    assert any("Developers respond" in (c or "") for _, c in posts), "the event"
-    assert len(posts) > 2, "agents posted of their own accord"

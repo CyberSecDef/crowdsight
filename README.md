@@ -418,16 +418,21 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 881 tests: 822 unit (no services, ~14s) and 59 integration against live
-Neo4j and Ollama (~8 min), including a real document upload driven through to a built
-graph, a real scenario derivation checked against the config schema, and a three-agent
-two-round simulation driven end to end against local inference. `test_oasis_profile_contract.py` and `test_action_space.py` run in the default
+The suite is 1043 tests: 981 unit (no services, ~19s) and 62 integration against live
+Neo4j and Ollama (~2 min), including a real document upload driven through to a built
+graph, a real scenario derivation checked against the config schema, a three-agent
+two-round simulation driven end to end against local inference, a live run killed with
+SIGKILL mid-round and resumed, and the whole create-prepare-start pipeline. `test_oasis_profile_contract.py` and `test_action_space.py` run in the default
 suite despite costing ~4s to import OASIS: they are the checks that a simulation will
 actually load its agents and that those agents will actually be able to act, and they
 are worth always running.
 
-Integration tests (`test_simulation_smoke.py`, `test_e2e_pipeline.py`) run real micro-runs
-against local Ollama and are required before any release. `test_simulation_config.py`
+**`tests/test_simulation_smoke.py` is the release gate.** Two tests: the micro-run
+(3 agents, 2 rounds against real local Ollama, asserting round attribution and per-action
+counts), and the whole pipeline — create, prepare, start, complete — with a population the
+model actually generates. Both are `integration`-marked and excluded from the fast loop.
+Run them before any release; assembling the pieces is what has caught the last two real
+bugs, neither of which any unit test could see. `test_simulation_config.py`
 also carries two: mocked tests can only prove the code does what the model was *assumed*
 to do, so these generate a scenario against the live model and assert it validates — and
 that every quote it attributes to a named person re-locates in the source at exactly the

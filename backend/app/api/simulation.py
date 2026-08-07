@@ -350,8 +350,7 @@ async def prepare_job(
 
     progress.update(stage="sketch", progress=0.08,
                     message="Sketching the affected population")
-    sketch = await sketch_population(ontology, document, runtime.llm) if ontology \
-        else await sketch_population(None, document, runtime.llm)
+    sketch = await sketch_population(ontology, document, runtime.llm)
 
     generator = ProfileGenerator(runtime.config, llm=runtime.llm)
     plan = plan_population(contexts, total=total_agents, sketch=sketch,

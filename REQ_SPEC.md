@@ -657,13 +657,23 @@ The `Runtime` now owns a `SimulationManager` and reaps orphans on startup, so an
 
 **Tests:** `tests/test_simulation_control_api.py` — 50 tests covering routing (the static `/list`, `/budget` and `/prepare/status` routes must not be swallowed by `/<sim_id>`), every state guard, resume, and the deadlock.
 
-**Step 6: Engine test units**
+**Step 6: Engine test units** ✅
 **Tests:** `tests/test_ollama_model_binding.py` — assert `ModelFactory` is constructed with `ModelPlatformType.OLLAMA` and the configured local URL, and that no code path can construct an OpenAI-cloud model. Guards the core privacy property at the unit level.
 `tests/test_simulation_lifecycle.py` — create → prepare → start → stop transitions; invalid transitions (starting an unprepared simulation) are rejected with a clear error.
 `tests/test_simulation_persistence.py` — actions, posts, and comments persist to SQLite with correct round attribution; checkpoints are written.
 `tests/test_simulation_resume.py` — a run killed mid-flight resumes from its last checkpoint without duplicating rounds.
 `tests/test_process_isolation.py` — killing a simulation process does not affect the API; orphaned processes are reaped on manager restart.
 `tests/test_simulation_smoke.py` — a genuine end-to-end micro-run (3 agents, 2 rounds) against real local Ollama. Slow; mark it `@pytest.mark.integration` and exclude from the fast unit suite, but require it before any release.
+
+All six files exist and pass. Four were written as their steps landed — `test_ollama_model_binding.py` (Step 1), `test_process_isolation.py` (Step 2), `test_simulation_persistence.py` and `test_simulation_resume.py` (Step 3). This step added the two missing ones and audited the rest against the wording above.
+
+**The audit found a gap.** The spec asks for *comments* with correct round attribution, and the ledger only exposed posts. Round attribution is now general — `rows_by_round(table, id_column)`, with `posts_by_round`, `comments_by_round` and `actions_by_round` as thin wrappers — because a row's round is the range it falls in whatever table it lives in.
+
+**`test_simulation_lifecycle.py` tests the state machine where it is decided**, not over HTTP: `test_simulation_control_api.py` already covers the routes, and a rule enforced only in a route handler is one the worker, the scheduler and any future caller walk straight past. Writing it that way immediately proved the point — **`manager.start()` would happily spawn a worker for a simulation with no configuration at all**, because the only guard lived in the Flask handler. The spawned process would then die on a missing file with the run already recorded as started. The manager now refuses, naming what is missing. `manager.stop()` likewise now raises for an unknown simulation instead of reporting "not running", which made a typo look like success.
+
+**`test_simulation_smoke.py` is the release gate, at two scales.** The micro-run the spec asks for — three agents, two rounds, real inference — moved here from `test_simulation_runner.py` rather than existing twice under two names, and was extended to assert what the run *produced*: every post attributed to exactly one round, per-action counts recorded, agents signed up with real usernames. A second test drives `create` → `prepare` → `start` → complete through the service layer with a population the model actually generates.
+
+**That second test earned its cost immediately**, finding a bug no unit test could see: `prepare_job` passed `ontology=None` when a graph had no ontology file, and `sketch_population` dereferenced it — an `AttributeError` several minutes into preparation. The Step 5 end-to-end run missed it because that graph had an ontology. The ontology is now genuinely optional, since it enriches the prompt rather than determining correctness, and a unit test covers the `None` path.
 
 ---
 
