@@ -95,6 +95,22 @@ hdr=$(curl -sI "$BASE/api/health/live")
 grep -qiE '^server: nginx/[0-9]' <<<"$hdr"; [ $? -ne 0 ]
 check "the gateway does not announce its version" $? "$(grep -i '^server:' <<<"$hdr" | tr -d '\r')"
 
+# Flask and the gateway both set these. The gateway hides the upstream copy so
+# exactly one survives — two different CSPs are enforced as their intersection,
+# which is a confusing way to break a page.
+for header in content-security-policy x-content-type-options referrer-policy x-frame-options; do
+    count=$(curl -sI "$BASE/api/health/live" | grep -ci "^$header")
+    [ "$count" = "1" ]
+    check "exactly one $header reaches the browser" $? "count=$count"
+done
+
+# CORS used to be a wildcard, which would have let any page the user visited
+# read their simulation data.
+cors=$(curl -sI -H 'Origin: http://evil.example' "$BASE/api/simulation/list" \
+    | grep -i 'access-control-allow-origin' | tr -d '\r')
+[ -z "$cors" ]
+check "AN ARBITRARY ORIGIN IS NOT GRANTED ACCESS" $? "${cors:-no CORS header at all}"
+
 # Nothing in the shipped bundle should name a host that is not ours.
 external=$(docker compose exec -T frontend sh -c \
     "grep -rhoE 'https?://[a-zA-Z0-9.-]+' /usr/share/nginx/html --include='*.js' --include='*.html' --include='*.css' 2>/dev/null \

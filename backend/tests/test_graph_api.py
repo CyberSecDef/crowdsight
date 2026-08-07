@@ -13,6 +13,7 @@ what a stub cannot prove.
 
 from __future__ import annotations
 
+import io
 import time
 from typing import Any
 
@@ -169,6 +170,41 @@ def test_upload_without_a_file_is_400(client):
                            content_type="multipart/form-data")
     assert response.status_code == 400
     assert "error" in response.get_json()
+
+
+def test_the_refusal_says_no_parts_arrived_at_all(client):
+    response = client.post("/api/graph/upload", data={},
+                           content_type="multipart/form-data")
+    assert "No file parts were present" in response.get_json()["error"]
+
+
+def test_A_CALLER_SENDING_files_IS_TOLD_WHAT_IT_SENT(client):
+    """`files` is the obvious guess and a real client made it.
+
+    It is not accepted as an alias: a graph is built from exactly one document,
+    so `files` would promise a multi-upload that silently discards everything
+    after the first. But being told only what to send, and not what arrived,
+    means guessing twice.
+    """
+    response = client.post(
+        "/api/graph/upload",
+        data={"files": (io.BytesIO(b"Council notes."), "notes.txt")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert "'file'" in error, "it must still say what to send"
+    assert "files" in error, "and name what actually arrived"
+
+
+def test_sending_several_files_is_refused_rather_than_silently_truncated(client):
+    response = client.post(
+        "/api/graph/upload",
+        data={"files": [(io.BytesIO(b"one"), "a.txt"), (io.BytesIO(b"two"), "b.txt")]},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
 
 
 @pytest.mark.parametrize("filename", ["notes.exe", "archive.zip"])

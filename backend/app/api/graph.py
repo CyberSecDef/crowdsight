@@ -73,7 +73,18 @@ def upload():
     """
     uploaded = request.files.get("file")
     if uploaded is None or not uploaded.filename:
-        return _error("No file was uploaded. Send multipart/form-data with a 'file' part.", 400)
+        # Name what actually arrived. A caller sending `files` (plural) — the
+        # obvious guess, and one a real client made — otherwise gets told what
+        # to send without being told what it sent, and has to guess twice.
+        # A graph is built from exactly one document, so `files` is not
+        # accepted as an alias: it would promise a multi-upload that silently
+        # discards everything after the first.
+        received = sorted(request.files.keys())
+        detail = (f" Received {received!r} instead." if received
+                  else " No file parts were present at all.")
+        return _error(
+            "No file was uploaded. Send multipart/form-data with a single "
+            f"'file' part.{detail}", 400)
 
     data = uploaded.read()
     runtime = get_runtime()
