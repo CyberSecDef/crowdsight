@@ -70,6 +70,10 @@ SIMS = _int_env("CROWDSIGHT_STRESS_SIMS", 4)
 AGENTS = _int_env("CROWDSIGHT_STRESS_AGENTS", 40)
 INFERENCE = _int_env("CROWDSIGHT_STRESS_INFERENCE", 24)
 CPU_WORKERS = _int_env("CROWDSIGHT_STRESS_WORKERS", 0) or (os.cpu_count() or 8)
+#: How long a simulation is given to reach a round boundary once the window
+#: closes. Rounds take minutes under full load, so this rarely succeeds; it
+#: exists so a run that *is* nearly done gets to finish rather than be killed.
+STOP_GRACE = _int_env("CROWDSIGHT_STRESS_STOP_GRACE", 45)
 
 pytestmark = [
     pytest.mark.stress,
@@ -151,13 +155,16 @@ class Monitor:
         if self._thread:
             self._thread.join(timeout=5)
 
-    def report(self) -> dict[str, Any]:
-        if not self.samples:
+    def report(self, until: float | None = None) -> dict[str, Any]:
+        """Statistics over the whole run, or only up to ``until``."""
+        samples = [s for s in self.samples
+                   if until is None or s.at <= until] or self.samples
+        if not samples:
             return {}
-        cpu = [s.cpu_percent for s in self.samples]
-        mem = [s.mem_used_gb for s in self.samples]
+        cpu = [s.cpu_percent for s in samples]
+        mem = [s.mem_used_gb for s in samples]
         return {
-            "duration_s": round(self.samples[-1].at - self.samples[0].at, 1),
+            "duration_s": round(samples[-1].at - samples[0].at, 1),
             "cpu_peak_pct": round(max(cpu), 1),
             "cpu_mean_pct": round(statistics.fmean(cpu), 1),
             "cpu_over_90_pct_of_time": round(
@@ -165,9 +172,9 @@ class Monitor:
             "mem_peak_gb": round(max(mem), 2),
             "mem_start_gb": round(mem[0], 2),
             "mem_growth_gb": round(max(mem) - mem[0], 2),
-            "mem_peak_pct": round(max(s.mem_percent for s in self.samples), 1),
-            "peak_processes": max(s.processes for s in self.samples),
-            "samples": len(self.samples),
+            "mem_peak_pct": round(max(s.mem_percent for s in samples), 1),
+            "peak_processes": max(s.processes for s in samples),
+            "samples": len(samples),
         }
 
 
@@ -494,13 +501,31 @@ def simulation_fleet(config, base: Path, deadline: float) -> list[dict[str, Any]
     outcomes = []
     for sim_id in sim_ids:
         status = manager.status(sim_id)
-        if status.get("running"):
-            manager.stop(sim_id, timeout=20)
+        was_running = bool(status.get("running"))
+        stop_outcome = None
+        if was_running:
+            # A round under this much contention takes minutes, and a graceful
+            # stop only takes effect at a round boundary, so this will usually
+            # escalate to a kill. That is the time box expiring, not the run
+            # failing -- but the manager cannot tell the difference and marks
+            # a killed worker failed, so record what actually happened.
+            stop_outcome = manager.stop(sim_id, timeout=STOP_GRACE)
+
+        state = store.load_meta(sim_id).state
+        if not was_running:
+            ended = "finished on its own"
+        elif stop_outcome == "stopped":
+            ended = "stopped cleanly at the time limit"
+        else:
+            ended = "killed at the time limit, mid-round"
+
         outcomes.append({
             "sim_id": sim_id,
             "rounds_completed": status.get("round", 0),
             "stage": status.get("stage", "unknown"),
-            "state": store.load_meta(sim_id).state,
+            "ended": ended,
+            "stop_outcome": stop_outcome,
+            "state": state,
         })
     return outcomes
 
@@ -601,6 +626,15 @@ def test_peg_the_machine(integration_config, capsys):
             "minutes": MINUTES, "simulations": SIMS, "agents_each": AGENTS,
             "concurrent_completions": INFERENCE, "cpu_workers": CPU_WORKERS,
         },
+        "timing": {
+            "load_window_s": round(duration, 1),
+            "total_s": round(time.time() - started, 1),
+            "note": ("The CPU-bound loads stop when the window closes; the "
+                     "simulations run on until they finish a round or are "
+                     "stopped, so the total exceeds the window and the CPU "
+                     "mean is diluted by the tail."),
+        },
+        "machine_during_load_window": monitor.report(until=started + duration),
         "machine": monitor.report(),
         "work": counters.report(),
         "simulations": fleet,
