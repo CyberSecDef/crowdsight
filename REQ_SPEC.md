@@ -834,8 +834,22 @@ Three of the four files already existed from Steps 1–3. `tests/test_report_san
 
 ### Phase 9: Frontend
 
-**Step 1: Application shell**
+**Step 1: Application shell** ✅
 Vue 3 + Vite. Router with views for Home/project list, the five-stage workflow, and a run history browser. An API client module wrapping the backend with consistent error handling and polling helpers.
+
+Built in `frontend/`: three runtime dependencies (vue, vue-router, pinia), plain CSS with design tokens, and a two-stage image that compiles with Node and serves the bundle from nginx. Verified against the live sealed stack: **20/20**.
+
+**Routes are named after the resource, not the step number.** The five stages are a workflow, but they are not one resource — stages 1 and 2 happen before a simulation exists, and a graph can feed several simulations. `/graphs/:graphId` and `/simulations/:simId/{profiles,run,report,interview}` mean every stage is bookmarkable, which matters when a run takes hours and reopening one tomorrow is the normal case rather than the exception. The numbering still appears, as a progress indicator reading `meta.stage`; it is just not what the address bar is built from. A stage the user cannot reach yet renders as text rather than a link, because the ordering is real and a link that 404s teaches nothing.
+
+**Dependencies are fetched at build time only.** `npm ci` runs inside `docker build`, which is the same category as pulling a base image or the model weights — the runtime container carries a compiled bundle with no Node, no `node_modules` and no package manager, on the sealed network with nowhere to fetch from. The verification asserts this rather than assuming it: the shipped bundle names no external host, the container is refused when it tries to reach the npm registry, and it is on the sealed network and *not* on the edge network.
+
+**The CSP is declared as well as enforced by the network,** because a policy is checkable from a browser and a reviewer should not have to take the network's word for it.
+
+**A real nginx trap, caught by the verification.** `add_header` does not merge across levels: a location block that sets any header of its own discards every header inherited from the server block. The CSP was set once at server level and `location = /index.html` set a `Cache-Control` — so the app page, the one page that needs a CSP, was served without one. Silently. The headers are now repeated in every location that sets any header.
+
+**The API vocabulary was not what I assumed, and no HTTP-level check would have caught it.** A *simulation* has a `state` (`draft`/`running`/`complete`/`failed`); a *background task* has a `status` (`pending`/`running`/`awaiting_review`/`succeeded`/`failed`). Reading `entry.status` on a simulation returns undefined, so every run rendered as "unknown" — and the invented values `completed` and `stopped` do not exist at all. Graph records carry `entity_count` and `domain` but no `document_count`; run-status reports `total_rounds`, not `rounds`. **A field the UI reads and the API does not send looks broken rather than wrong**, so the verification now asserts the contract field by field, including that a simulation record has not quietly grown a `status` alongside its `state`. The vocabulary lives in `src/api/states.js` so views import it instead of typing literals.
+
+**`awaiting_review` is neither finished nor failing.** Ontology review parks a task deliberately and waits for a person, so the polling helper treats *settled* as terminal-or-parked; a poller that only knows "running or terminal" spins forever on a task nobody is working on. Worth noting that **Step 7 describes the polling state machine as idle → running → complete → error, which omits this state** — the parked case is real and the tests for it should cover four outcomes, not three. Polling also backs off on error rather than dying on one hiccup after an hour of watching, gives up immediately on a 404 or a refusal since neither fixes itself, and pauses while the tab is hidden — a run takes hours, and polling every 1.5 seconds into a background tab all afternoon is pure waste.
 
 **Step 2: Stage 1 — graph build**
 Upload UI (drag-drop, type and size validation client-side), ontology review and edit, extraction progress, and an interactive graph visualisation (Cytoscape.js or vis-network) with type filtering and node inspection.

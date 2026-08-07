@@ -1,0 +1,21 @@
+{
+  "name": "crowdsight-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The CrowdSight UI. Talks only to the backend, through the gateway, on the same origin.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "pinia": "^2.2.6",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}

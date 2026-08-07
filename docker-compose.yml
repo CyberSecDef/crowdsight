@@ -126,18 +126,23 @@ services:
       start_period: 20s
 
   frontend:
-    # Phase 9 builds this. Until then it is profile-gated, so
-    # `docker compose up -d` brings up the other services and the gateway
-    # serves a placeholder at / instead of proxying here.
+    # Static files only. Building the image needs the npm registry — the one
+    # place in this project that touches the internet, and only at build time,
+    # like pulling a base image. The container itself joins the sealed network
+    # carrying a compiled bundle, with no Node and no package manager.
     build:
       context: ./frontend
     image: crowdsight-frontend:dev
     container_name: crowdsight-frontend
     restart: unless-stopped
-    profiles: [frontend]
     networks: [sealed]
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/_frontend/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
 
   # --- Ingress -------------------------------------------------------------
   gateway:

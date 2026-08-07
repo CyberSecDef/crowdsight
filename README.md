@@ -206,8 +206,8 @@ docker compose up -d                 # sealed network only — no egress
 docker compose exec backend python -m app.egress_check                 # prove it
 ```
 
-Then open <http://localhost:8080>. Until Phase 9 builds the frontend, that address serves
-a placeholder and the API is the live part:
+Then open <http://localhost:8080> for the UI. The API is reachable on the same origin, and
+directly on `:5000` for tooling:
 
 ```bash
 curl http://localhost:8080/api/health     # through the gateway
@@ -215,8 +215,15 @@ curl http://localhost:5000/api/health     # direct to the API
 ```
 
 Ports bind to `127.0.0.1` by default. There is no authentication in front of this stack;
-set `CROWDSIGHT_BIND=0.0.0.0` in `.env` only if you mean to expose it to your LAN. Once
-the frontend exists, bring it up with `docker compose --profile frontend up -d`.
+set `CROWDSIGHT_BIND=0.0.0.0` in `.env` only if you mean to expose it to your LAN.
+
+**Building the frontend image needs the npm registry.** It is the one part of the project
+that touches the internet outside provisioning, and it does so only during
+`docker compose build frontend` — the same category as pulling a base image. `npm ci`
+installs exactly what `frontend/package-lock.json` pins, and the resulting container
+carries a compiled bundle with no Node and no package manager, on the sealed network.
+Verify the shipped UI with `./scripts/verify_frontend.sh`, which asserts among other
+things that the bundle names no external host and that the container cannot reach one.
 
 ### Verifying nothing left your network
 
