@@ -1053,8 +1053,20 @@ And `203.0.113.10` was used as an example of a public address. It is RFC 5737 do
 
 **The audits skip in-container and say where to run them,** because the backend image carries `backend/` only and holds no `frontend/src` at all — an in-container run would audit half the tree while looking green. That is the same split `test_network_isolation.py` already uses for its topology assertions. The full gate is a host command.
 
-**Step 3: Performance baseline**
+**Step 3: Performance baseline** ✅
 Record wall-clock timings for a standard workload (50 agents, 10 rounds) on the target hardware. Store as a baseline so regressions are visible. Document expected duration prominently — users must know a real run takes hours, not minutes.
+
+Measured for real rather than extrapolated: **50 agents × 10 rounds, 26.6 minutes** end to end on the reference machine — 4.3 minutes to generate the population, 19.4 to run it, 2.9 to write the report. Recorded in `docs/performance-baseline.json` with the hardware and the concurrency budget it was measured under, and reproducible with `scripts/benchmark.py`.
+
+**It reports drift rather than passing or failing.** The same three-agent population has taken anywhere from 4 to 32 seconds a round on this machine depending on what else was running. A threshold loose enough not to cry wolf would not catch a real regression, and a tight one goes red for reasons that have nothing to do with the change.
+
+**Rounds get slower as a run goes on — by about a factor of two over ten.** Round 1 took 72 seconds and round 10 took 145, with the same population. Agent memory and the feed both grow, so the prompts grow with them. This is the most useful thing in the baseline: **estimating a long run from its first couple of rounds underestimates it by roughly half**, which is exactly the estimate an impatient operator would make.
+
+**The report scales too, and was not obviously going to.** 175 seconds here against 15 on a three-agent run — sentiment is scored per post, so it grows with what the population produced rather than with the population itself.
+
+**A correction to my own assumption.** With `LLM_CONCURRENCY=4`, `API_LLM_RESERVE=1` and `MAX_CONCURRENT_SIMULATIONS=2`, a lone run is allocated `(4−1)//2 = 1` concurrent request, and I expected that to leave the GPU idling. Sampling during the run showed **83% mean utilisation and 97% median** — one 14b generation already saturates the card, so the static split costs far less than the arithmetic suggests. Worth knowing before anyone "optimises" it.
+
+**Extrapolated to the spec's headline figure**, 300 agents over 10 rounds is about six times this workload: **2.5–3 hours**, an overnight job. The README now leads with that, because the failure this step exists to prevent is someone starting a real run expecting a coffee break.
 
 **Step 4: Operational tooling**
 Health endpoint reporting Ollama reachability, Neo4j connectivity, model availability, and disk headroom. Structured JSON logging. A backup script for the Neo4j store and `data/`. A cleanup command for old simulation databases.

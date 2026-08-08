@@ -158,6 +158,54 @@ Ollama), `camel-ai==0.2.78`, `camel-oasis==0.2.5`, `neo4j>=5.15`, `pydantic>=2.0
 
 ---
 
+## How long a run takes
+
+**Hours, not minutes.** Every agent turn is a full inference call on a local model,
+so wall-clock scales with agents × rounds and there is no shortcut. Measured on the
+reference machine (RTX 5070 Ti Laptop 12 GB, Ryzen 9 8940HX, 61 GB):
+
+| Stage | 50 agents × 10 rounds |
+|---|---|
+| Population (50 personas) | 4.3 min |
+| Simulation (10 rounds) | 19.4 min |
+| Report | 2.9 min |
+| **Total** | **26.6 min** |
+
+Two things that table does not show, and both matter when you plan a run:
+
+**Rounds get slower as the run goes on.** The same population took 72 s for round 1
+and 145 s for round 10 — roughly double. Agent memory and the feed both grow, so the
+prompts grow with them. Estimating a long run from its first couple of rounds will
+underestimate it, by about a factor of two over ten rounds.
+
+**Scaling is close to linear in agents.** The spec's headline figure of 300 agents is
+about six times this workload, which puts a 300-agent, 10-round run at roughly
+**2.5–3 hours** — an overnight job rather than a coffee break. Start small: 20 agents
+and 3 rounds finishes in a few minutes and tells you whether the scenario is worth
+running properly.
+
+The GPU is genuinely busy throughout — sampled at **83% mean utilisation, 97% median**
+during the run — so this is the model's speed, not idle time waiting on coordination.
+A single simulation is allocated one concurrent request by default
+(`(LLM_CONCURRENCY − API_LLM_RESERVE) // MAX_CONCURRENT_SIMULATIONS`), and raising that
+buys less than you would expect for exactly this reason: one 14b generation already
+saturates the card.
+
+Re-measure any time, and compare against the stored baseline:
+
+```bash
+python scripts/benchmark.py                  # run and report drift
+python scripts/benchmark.py --save           # adopt as the new baseline
+python scripts/benchmark.py --agents 20 --rounds 3
+```
+
+The baseline lives in [`docs/performance-baseline.json`](docs/performance-baseline.json)
+with the hardware it was measured on. It reports drift rather than passing or failing:
+wall-clock on a shared GPU varies enough that a threshold would either catch nothing or
+cry wolf.
+
+---
+
 ## Quick start
 
 ### Prerequisite: NVIDIA Container Toolkit
