@@ -1034,8 +1034,24 @@ The first was mine, from the interview window. The smoke test asserted the contr
 
 The second was older and worse. `test_a_real_run_killed_mid_flight_resumes` failed with `sqlite3.OperationalError: database is locked` while checkpointing round 2, and the same error had taken out the smoke test earlier the same afternoon. It passed cleanly when run alone, so it is contention rather than a regression — but **a flaky release gate is not a gate**. The run database was in SQLite's default rollback-journal mode, where a writer blocks everything for the length of its transaction; two processes write that file, the OASIS engine as agents act and the ledger as rounds are checkpointed, and a checkpoint that gives up loses the round boundary resume depends on. The ledger now puts the database into **WAL** mode when it adds its table, which is stored in the file and so applies to the engine's own connections too.
 
-**Step 2: Egress verification suite**
+**Step 2: Egress verification suite** ✅
 `tests/test_egress_verification.py` — the compliance gate. **Include the frontend container**, which `test_network_isolation.py` does not yet cover: it publishes no ports, has no default route, is on the sealed network and not the edge one, and is refused when it reaches for the npm registry. `scripts/verify_frontend.sh` asserts all four today, but a release blocker belongs in the gate. Assert the backend container has no route off-host; assert config validation rejects external URLs; assert no source file contains a non-allowlisted URL literal (grep the tree for `http(s)://` and diff against the allowlist); optionally capture traffic during a short run and assert every destination is in the allowlist. **Treat a failure here as a release blocker, not a warning.**
+
+Built as `tests/test_egress_verification.py`, **24 checks**, marked `egress` so it can never be skipped by the default suite. It complements `test_network_isolation.py` rather than replacing it: that file proves the *running network* has no route off-host and is Phase 1's foundation; this one proves the things that survive a restart and would still hold if the network were opened tomorrow.
+
+**The source-tree audit is the check with the longest reach, and the tree is clean.** `backend/app` and `frontend/src` between them name exactly one external-looking host — `http://ollama`, a service on the sealed network. Tests and documentation are deliberately outside the audit: a test proving `api.openai.com` is unreachable has to name it, and a README linking to a licence is not calling it.
+
+**The lockfile turned out to be a supply-chain check.** All 182 URLs in `frontend/package-lock.json` resolve from `registry.npmjs.org`; a dependency pulled from anywhere else would be a change nobody reviewed and would be invisible in the `package.json` everyone reads. The Python requirements are checked for `--index-url` and friends for the same reason.
+
+**Traffic capture was offered as optional and is deliberately not built.** It needs tcpdump inside the container and NET_RAW granted to the very container the project exists to confine — weakening the thing being tested in order to test it. The evidence already in hand is stronger and free: the sealed network is `internal: true`, so there is no route for traffic to be captured *on*, and the gate attempts real connections to real external hosts and requires them to fail. Recorded here rather than left as an unexplained gap.
+
+**Two mistakes of my own, both the kind that make a test look green while proving nothing.**
+
+The refusal tests originally asserted only that `Config()` raised. Run from a host with no `.env`, they passed — because it raised over a missing `NEO4J_PASSWORD`, not the perimeter. **They would have gone on passing with the perimeter check deleted entirely.** They now supply a complete base environment and assert the message is about the perimeter.
+
+And `203.0.113.10` was used as an example of a public address. It is RFC 5737 documentation space, which Python's `ipaddress.is_private` reports as *private* — so that case tested the opposite of what it appeared to. Replaced, with a note so it is not reintroduced.
+
+**The audits skip in-container and say where to run them,** because the backend image carries `backend/` only and holds no `frontend/src` at all — an in-container run would audit half the tree while looking green. That is the same split `test_network_isolation.py` already uses for its topology assertions. The full gate is a host command.
 
 **Step 3: Performance baseline**
 Record wall-clock timings for a standard workload (50 agents, 10 rounds) on the target hardware. Store as a baseline so regressions are visible. Document expected duration prominently — users must know a real run takes hours, not minutes.

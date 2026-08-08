@@ -441,7 +441,7 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 1551 tests: 1488 unit (no services, ~54s) and 63 integration against live
+The suite is 1560 tests: 1497 unit (no services, ~56s) and 63 integration against live
 Neo4j and Ollama (~2 min), including a real document upload driven through to a built
 graph, a real scenario derivation checked against the config schema, a three-agent
 two-round simulation driven end to end against local inference, a live run killed with
@@ -497,6 +497,26 @@ suite goes red rather than green. A failure there is a release blocker, not a wa
 Run it either way: inside the container it asserts against its own network stack; from the
 host it shells in via `docker compose exec`. The topology assertions (network flags, port
 bindings, gateway) inspect the Docker daemon and so run host-side only.
+
+**`tests/test_egress_verification.py` is the other half of the gate** — the parts a packet
+capture cannot see. It audits `backend/app` and `frontend/src` for any URL literal naming a
+host outside the allowlist (today they name exactly one: `http://ollama`), checks that every
+one of the 182 dependencies in `frontend/package-lock.json` resolves from
+`registry.npmjs.org`, asserts the configuration refuses an endpoint outside the perimeter
+*for that reason*, and confines the frontend container the same way — no published ports, no
+default route, sealed network only, and the npm registry unreachable at runtime.
+
+Both carry the `egress` marker. Run the full gate from the host, where the source tree and
+the Docker daemon are both visible:
+
+```bash
+pytest backend/tests/test_network_isolation.py backend/tests/test_egress_verification.py
+```
+
+Traffic capture during a run is deliberately not part of this: it would mean granting
+`NET_RAW` to the container the project exists to confine. The sealed network is
+`internal: true`, so there is no route to capture traffic on, and the gate already attempts
+real connections to real external hosts and requires them to fail.
 
 Other high-value tests: `test_oasis_profile_contract.py` (schema mismatches otherwise
 surface hours into a run), `test_action_space.py` (OASIS answers an unrecognised action
