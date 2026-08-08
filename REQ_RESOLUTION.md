@@ -40,12 +40,12 @@ section below.
 | [3](#phase-3) | Document ingestion and knowledge graph construction | 8 | **8 / 8** — 6 ✅, 2 ⚠️ |
 | [4](#phase-4) | Agent profile generation | 5 | **5 / 5** — 5 ✅ |
 | [5](#phase-5) | Simulation configuration generation | 4 | **4 / 4** — 3 ✅, 1 ⚠️ |
-| [6](#phase-6) | Simulation execution engine | 6 | _pending_ |
+| [6](#phase-6) | Simulation execution engine | 6 | **6 / 6** — 5 ✅, 1 ⚠️ |
 | [7](#phase-7) | Monitoring, data access, and agent interviews | 5 | _pending_ |
 | [8](#phase-8) | Report generation | 4 | _pending_ |
 | [9](#phase-9) | Frontend | 7 | _pending_ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **26 / 53** |
+| | **Total** | **53** | **32 / 53** |
 
 ---
 
@@ -1034,85 +1034,276 @@ at exactly the recorded offsets with a speaker the document names.
 
 > Specification: [line 539](REQ_SPEC.md#L539)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Build `simulation_runner.py`. Instantiate the OASIS environment with CAMEL's `ModelFactory`
+bound to local Ollama (`ModelPlatformType.OLLAMA`, the configured URL, temperature 0.7), and
+**verify it before building anything on top** — a smoke test of three agents for two rounds
+confirming requests arrive locally.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `build_model()` is the only way to get a model backend, and the guarantee is structural: the
+signature is `(config=None, *, temperature=None, model_name=None)` — **there is no
+`model_platform` parameter**, so a caller cannot ask for a cloud vendor. The module names
+`ModelPlatformType.OLLAMA` and no other platform at all. It re-checks the URL through the same
+`classify_host` the configuration uses, so a `Config` mutated after validation is still caught,
+and refuses an empty URL by name because camel would otherwise fall back to `OLLAMA_BASE_URL`
+and shell out to an `ollama` binary the image does not contain.
 
-**Where:** _pending_
+Probed: `build_model()` returns a real `OllamaModel` bound to `http://ollama:11434/v1`;
+`LLM_BASE_URL=""` raises `ModelBindingError` naming the fallback; `https://api.openai.com/v1`
+raises "Every agent turn would leave this machine." `SIMULATION_TEMPERATURE` is 0.7, the spec's
+figure.
 
-**Verified by:** _pending_
+**All four OASIS defects re-confirmed against the installed camel-oasis**, not taken from the
+narrative. `get_db_path()` with `OASIS_DB_PATH` unset raises `PermissionError` on
+`/usr/local/lib/python3.11/site-packages/oasis/data` — the package-internal fallback, exactly as
+described — and returns the run's own path once the runner sets it; `agent_environment` calls it
+three times. `OasisEnv` declares `semaphore: int = 128`; the runner passes its own concurrency.
+`generate_twitter_agent_graph` never mentions `user_name`, building
+`UserInfo(name=agent_info["username"][...], description=...)`. `OasisEnv.step` gathers with a
+bare `await asyncio.gather(*tasks)` — no `return_exceptions`. And `SocialAgent.__init__` contains
+the "is not supported" warning with **no `raise` anywhere**.
+
+`harden_agent()` closes the gather hole per instance: with one agent raising `RuntimeError`, the
+other still returned `"acted"`, the failure was counted and named (`alice: RuntimeError:
+timeout`), and re-hardening is a no-op. `KeyboardInterrupt` propagated — a stop request is never
+swallowed. `seed()` has no `try` around its step, so a seed that cannot be published is still a
+broken run.
+
+The username backfill is visible in real data: a completed 50-agent run has **51 users, none with
+an empty `user_name`**. The broadcaster is separate and distinguishable — agent 50,
+`rbnewsnow` / "Riverbend News Now", where every population agent's `name` equals its
+`user_name` because that is all OASIS sets.
+
+The second sealed-network fix is in place: `HF_HOME=/opt/huggingface` holds
+`models--Twitter--twhin-bert-base` (1.1 GB) and `HF_HUB_OFFLINE=1` is set in the running
+container.
+
+**Where:** `backend/app/services/simulation_runner.py` — `build_model` (92), `harden_agent` (173), `attach_graph_memory` (202), `trim_agent_memory` (228), `SimulationRunner.setup` (432), `add_broadcaster` (397), `_name_the_agents` (344); `Dockerfile` (`HF_HOME`, `HF_HUB_OFFLINE`)
+
+**Verified by:** `tests/test_ollama_model_binding.py` (17) and `tests/test_simulation_runner.py` (21). The privacy guard mutation-tested: making `classify_host` answer "loopback" for every host fails 4 tests, including all three public-endpoint cases. Making `harden_agent` a no-op fails 4 more. The smoke test moved to `test_simulation_smoke.py` as Step 6 records, rather than existing twice. The three `integration` files ran together against live Ollama, Neo4j and real spawned processes for this document: **4 passed, 41 deselected in 22 m 46 s**.
 
 ### 6.2 — Process isolation and IPC
 
 > Specification: [line 576](REQ_SPEC.md#L576)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** One OS process per run, not a thread, independently killable. `simulation_ipc.py` for
+control-plane messaging over a queue or Unix socket; `simulation_manager.py` tracking PIDs,
+lifecycle state and cleanup of orphans on restart. The manager must **divide the
+`LLM_CONCURRENCY` budget across the workers it spawns**, passing each its share through the
+environment, and reserve a share for the API.
 
-**Satisfied by:** _pending_
+**Satisfied by:** The arithmetic is `(LLM_CONCURRENCY - API_LLM_RESERVE) // MAX_CONCURRENT_SIMULATIONS`, floored at
+1. On this configuration (4, 1, 2) each worker gets **1**. The specification's own failure case
+was re-run: with `LLM_CONCURRENCY=4` and three runs the worst case is `share × max + reserve` =
+**3 requests in flight, never 12**. A degenerate budget of `(1-1)//3` returns 1 rather than 0, so
+a worker is never given nothing. The share is passed through the environment
+(`CROWDSIGHT_WORKER_CONCURRENCY`) at spawn, and the worker builds its own `Config`, so it never
+guesses.
 
-**Where:** _pending_
+**`spawn`, never `fork`** — confirmed live: `multiprocessing.get_start_method()` on this platform
+is `fork`, and the manager's context reports `spawn`.
 
-**Verified by:** _pending_
+**Unix socket, newline-delimited JSON**, driven here by a raw socket the way `socat` would:
+
+    -> {"command": "status"}   <- {"ok": true, "result": {"round": 2, "rounds": 4}}
+    -> {"command": "nonsense"} <- {"ok": false, "error": "Unknown command 'nonsense'"}
+    -> not json at all         <- {"ok": false, "error": "Malformed request: ..."}
+    -> {"command": "boom"}     <- {"ok": false, "error": "RuntimeError: handler exploded"}
+
+Two commands travel down one connection, a handler that raises does not kill the server, and the
+socket is mode `0600`. The documented asymmetry is real and was hit while probing: calling the
+blocking client from inside the server's own loop hangs, which is why the probe runs the server
+in its own thread.
+
+The three defects hold as fixed, verified against real processes. A terminated-but-unreaped
+child reports state `Z` and `WorkerRecord.alive()` returns **False**; once reaped, `/proc` is
+gone. PID reuse is caught: the same PID with a wrong start time is not ours; with the right one
+it is. `MAX_SOCKET_PATH` is 107 and a too-deep directory raises `IPCError` naming the length
+rather than failing at `bind()`. A vanished worker is marked failed, not complete: the worker
+records its own outcome on the way out (`_record_outcome(..., failed=True)` in its `except`
+path), and `_reconcile_finished` only ever moves a run still recorded as `running`, so a killed
+process cannot read as a finished one.
+
+Orphans are reconciled at startup rather than left: `reap_orphans()` walks everything recorded as
+`running` and pings each control socket — which outlives the parent — adopting a worker that
+answers, escalating one that is alive but wedged, and marking a vanished one failed.
+
+**Where:** `backend/app/services/simulation_manager.py` — `worker_share` (93), `process_status` (105), `WorkerRecord.alive` (147), `start` (324); `simulation_ipc.py` — `MAX_SOCKET_PATH` (70), `ControlServer` (131), `ControlClient`; `simulation_worker.py` (`spawn` target)
+
+**Verified by:** `tests/test_process_isolation.py` — **33 tests**, against real spawned processes, including `test_THE_SPECS_OVERSUBSCRIPTION_CANNOT_HAPPEN`, `test_A_REUSED_PID_IS_NEVER_MISTAKEN_FOR_OURS`, `test_a_zombie_counts_as_dead`, `test_KILLING_A_SIMULATION_DOES_NOT_AFFECT_THE_API`, `test_A_LIVE_ORPHAN_IS_ADOPTED_NOT_KILLED` and `test_a_vanished_worker_is_marked_failed_for_resume`. `tests/test_ipc.py` adds 26.
 
 ### 6.3 — Round loop and persistence
 
 > Specification: [line 607](REQ_SPEC.md#L607)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Drive OASIS round by round. After each round persist agent actions, posts and comments to the
+run's SQLite database and write a checkpoint enabling resume. Emit structured progress: current
+round, total rounds, per-action counts, agents active.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Verified against a **real completed run** — 11 rounds, 50 agents plus the broadcaster, 279 posts,
+536 trace rows — rather than against fixtures.
 
-**Where:** _pending_
+OASIS's schema carries no round column anywhere; the only table that has one is
+`crowdsight_round`, and there are no `WITHOUT ROWID` tables to break attribution. The ledger
+records the high-water rowid of 13 tracked tables at each round's end. Replaying those marks
+attributes **every one of the 279 posts to exactly one round** (1, 35, 28, 30, 33, 26, 22, 24,
+28, 26, 26), with the seed as round 0 — a single post, one invocation, the broadcaster.
 
-**Verified by:** _pending_
+Per-action counts come from OASIS's own `trace` table over each round's range. Round 4 of that run
+reads `{create_post: 27, do_nothing: 1, follow: 2, quote_post: 5, refresh: 6, repost: 1}`. Each
+record also carries `invoked`, `acted`, `failed` and `skipped` — round 4 invoked 37 and skipped
+13, which is Step 5's participation roll doing its work.
+
+Rollback was exercised on a copy of that database: rolling back to round 5 removed exactly
+`{post: 126, trace: 252, follow: 7, like: 6}`, leaving 153 posts — round 5's recorded mark to the
+row. The 51 users were untouched, later checkpoints were discarded, **no post's `num_likes`
+disagreed with the rows that remained**, and re-running the rollback removed nothing.
+
+Resume keys off the database, not the checkpoint: `resuming = database_path.exists()`, and a
+database with no checkpoint is rolled back to empty so the seed cannot be published twice. The
+clock is advanced past completed rounds before the loop resumes, and a checkpoint is written
+only after a round completes. Agent memory is bounded to `SIMULATION_MEMORY_ROUNDS` (3), sliced
+at user-message boundaries so a tool result never loses its assistant tool-call. The run database
+is in **WAL**.
+
+**Where:** `backend/app/services/simulation_persistence.py` — `ROLLBACK_TABLES` (66), `marks` (161), `action_counts` (176), `record_round` (191), `rollback_to` (268), `_recount` (301), `rows_by_round` (332); round loop in `simulation_worker.py` (86-285); `trim_agent_memory` and `advance_clock` in `simulation_runner.py`
+
+**Verified by:** `tests/test_simulation_persistence.py` (41) and `tests/test_simulation_resume.py` (15 + 1 integration). Teeth confirmed by mutation: stopping `rollback_to` from rebuilding denormalised counters fails `test_ROLLBACK_REBUILDS_DENORMALISED_COUNTERS`. The three `integration` files ran together against live Ollama, Neo4j and real spawned processes for this document: **4 passed, 41 deselected in 22 m 46 s**.
 
 ### 6.4 — Graph memory feedback (optional, flagged)
 
 > Specification: [line 624](REQ_SPEC.md#L624)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Optionally feed significant simulation outcomes back into Neo4j as new nodes and edges so agent
+memory evolves across rounds. Build `graph_memory_updater.py`. Keep it behind a config flag,
+because it roughly doubles graph writes and materially increases run time.
 
-**Satisfied by:** _pending_
+**Satisfied by:** The flag is off: `GRAPH_MEMORY_FEEDBACK=False`, `GRAPH_MEMORY_MIN_ENGAGEMENT=1`,
+`GRAPH_MEMORY_TOP_N=5` — the spec's figures. Nothing is built when it is off, so a normal run
+pays nothing.
 
-**Where:** _pending_
+The loop is closed in both directions: `_write_graph_memory` after each round, `_refresh_graph_memory`
+before the next. The recollection is fetched **once per round into a single shared dict** and
+`attach_graph_memory` wraps `agent.env.to_text_prompt` — so it arrives as part of what the agent
+observes, alongside its feed, and there is no Neo4j round trip per agent.
 
-**Verified by:** _pending_
+The simulated/documented line was re-derived from the Cypher rather than taken on trust. Of the
+nine create-or-merge clauses in the module, **none names `:Entity`**. The labels it creates are
+exactly `SimRun`, `SimAgent`, `SimPost`. Three clauses touch `:Entity` and all three are
+`MATCH`/`OPTIONAL MATCH`; the string `SET e.` does not appear anywhere in the module. The single
+edge that crosses the line is `(p:SimPost)-[:ABOUT]->(e:Entity)` — named for exactly what it
+means, and pointing at the entity, never writing to it.
+
+Significance is engagement counted from the run's own database, not judged by a model, so the
+same round gives the same answer twice and nothing is added to the critical path of a saturated
+GPU. Entity linking ignores names of three characters or fewer: on "AB and Kim discussed the
+Riverside Development" it returns only `riverside development`. Both the read and write paths
+swallow their exceptions and log, so an optional enrichment cannot take down a run that is hours
+old.
+
+**Where:** `backend/app/services/graph_memory_updater.py` — `entity_names` (125), `collect` (148), `write_round` (220), `context_for` (289), `delete_run` (324), `_mentioned_entities` (334); `attach_graph_memory` in `simulation_runner.py:202`; `_refresh_graph_memory` / `_write_graph_memory` in `simulation_worker.py`
+
+**Verified by:** `tests/test_graph_memory.py` — 28 unit tests plus an `integration` test asserting the line holds against a live Neo4j. The three `integration` files ran together against live Ollama, Neo4j and real spawned processes for this document: **4 passed, 41 deselected in 22 m 46 s**.
 
 ### 6.5 — Simulation control API
 
 > Specification: [line 641](REQ_SPEC.md#L641)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `POST /api/simulation/create`, `POST /api/simulation/prepare` (async, returns a task id),
+`GET /api/simulation/prepare/status`, `GET /api/simulation/<id>/config`,
+`GET /api/simulation/<id>/profiles`, `POST /api/simulation/start`, `POST /api/simulation/stop`,
+`GET /api/simulation/list`.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All eight are registered, plus `GET /api/simulation/<id>/status` and `GET /api/simulation/budget`
+as the specification's account says.
 
-**Where:** _pending_
+Exercised live through the gateway. `GET /list` and `GET /budget` answer 200 — the budget reports
+`{llm_concurrency: 4, api_reserve: 1, max_concurrent_simulations: 2, per_worker: 1, capacity: 2,
+running: 0, lingering: 0}`. `GET /prepare/status` with no `task_id` answers **400**, not the 404
+it would give if `/<sim_id>` had swallowed the static route. `POST /create` against an unknown
+graph answers `{"error": "No graph ..."}`.
 
-**Verified by:** _pending_
+The state guards answer **409**, up front, rather than 404 or a worker dying minutes in. On a
+freshly created simulation: `/config` → 409 "has not been prepared yet"; `/profiles` → 409 "has
+no population yet"; `POST /start` → 409 "has no scenario yet; prepare it first". A missing
+simulation is a genuine 404, and `POST /stop` on one is 404 rather than a cheerful "not running".
+
+**The guards live in the manager, not only in the route.** Calling `manager.start()` directly on a
+simulation with no `config.json` raises `CapacityError` naming what is missing, and again for a
+scenario with no population — so the worker, the scheduler and any future caller hit the same
+rule. `manager.stop()` on an unknown id raises `SimulationNotFound`.
+
+`start` resumes: `resuming = meta.state == FAILED`, the manager admits only `draft` and `failed`,
+and the response carries `resumed`. `prepare` returns 200 with "Already prepared" unless
+`force=true`, which deletes the population outright so Phase 4's resumability cannot helpfully
+resume the very population being replaced.
+
+The deadlock fix is present and load-bearing: `graph_context` is async and awaited directly by the
+jobs, with `_graph_context` documented as "for Flask handlers only. Never call this from a job."
+The `Runtime` owns a `SimulationManager` and calls `reap_orphans()` at startup.
+
+**Where:** `backend/app/api/simulation.py` — `graph_context` (58), `derive_scenario_job` (90), `prepare` (413), `_discard_profiles` (473), `prepare_status` (481), `list_all` (499), `start` (677), `stop` (708), `budget` (731); `SimulationManager.start` (324); `Runtime` (`services/runtime.py:69-72`)
+
+**Verified by:** `tests/test_simulation_control_api.py` — **71 tests**. The deadlock guard mutation-tested: reintroducing the defect (a job reaching the blocking facade) fails **8 tests** across `test_simulation_control_api.py` and `test_simulation_api.py`, because both stubs raise when `run()` is called from inside a running loop.
 
 ### 6.6 — Engine test units
 
 > Specification: [line 660](REQ_SPEC.md#L660)
 
-**Status:** _pending_
+**Status:** ⚠️ Satisfied, with one coverage gap recorded below
 
-**Required:** _pending_
+**Required:** Six named files: `test_ollama_model_binding.py` (OLLAMA platform, configured local URL, no path to
+a cloud model), `test_simulation_lifecycle.py` (create → prepare → start → stop, invalid
+transitions rejected clearly), `test_simulation_persistence.py` (**actions, posts and comments**
+persist with correct round attribution; checkpoints written), `test_simulation_resume.py` (killed
+mid-flight, resumes without duplicating rounds), `test_process_isolation.py` (killing a run does
+not affect the API; orphans reaped on restart), `test_simulation_smoke.py` (3 agents, 2 rounds,
+real Ollama, `integration`-marked and excluded from the fast suite).
 
-**Satisfied by:** _pending_
+**Satisfied by:** All six exist and pass. Run together with `test_graph_memory.py` and
+`test_simulation_control_api.py`: **253 passed, 4 deselected in 21.4 s**. Counts: binding 17,
+lifecycle 29, persistence 41, resume 15 (+1 integration), isolation 33, smoke 0 (+2 integration),
+graph memory 28 (+1), control API 71.
 
-**Where:** _pending_
+Every clause has a test named for it. `test_NO_CODE_PATH_CAN_ASK_FOR_ANOTHER_PLATFORM` and
+`test_the_platform_is_ollama_not_openai`; `test_the_full_sequence_create_prepare_start_stop` and
+`test_STARTING_AN_UNPREPARED_SIMULATION_IS_REJECTED` with `test_the_error_says_what_is_missing`;
+`test_KILLING_A_SIMULATION_DOES_NOT_AFFECT_THE_API` and `test_A_LIVE_ORPHAN_IS_ADOPTED_NOT_KILLED`;
+`test_every_tracked_table_has_a_usable_rowid`, which is the guard against a future `WITHOUT ROWID`
+breaking attribution silently. `test_simulation_smoke.py` collects **nothing** without the
+`integration` marker, so it is genuinely excluded from the fast suite.
 
-**Verified by:** _pending_
+The lifecycle state machine is tested at the manager rather than over HTTP, as the specification's
+account says, and that placement is what caught `manager.start()` spawning a worker for a
+simulation with no configuration.
+
+**The gap.** The specification asks for **comments** with correct round attribution, and Step 6
+records closing it by generalising the ledger to `rows_by_round(table, id_column)` with
+`comments_by_round` as a wrapper. The method exists and is used by `run_reader.py` — but
+`test_simulation_persistence.py` **never mentions comments**, and nothing else tests
+`comments_by_round` or `rows_by_round` directly. Nor is there live evidence: of the 38 simulation
+databases on disk, 37 carry a `comment` table and **all 37 hold zero rows** (the 38th has no such
+table), because every run so far has been Twitter, whose action set has no `CREATE_COMMENT`. So the one clause of this step that named a third row type
+is carried by an untested method.
+
+Probed rather than assumed: synthesising comments across three rounds and re-reading them,
+`comments_by_round()` returned `{0: [1], 1: [2, 3], 2: [4, 5, 6]}` with the right contents. **The
+capability works; the coverage does not exist.** Recorded here rather than fixed — this document
+does not change code — and the obvious closure is a Reddit smoke run, which would exercise
+comments and the other half of Phase 5's action space at the same time.
+
+**Where:** `backend/tests/test_ollama_model_binding.py`, `test_simulation_lifecycle.py`, `test_simulation_persistence.py`, `test_simulation_resume.py`, `test_process_isolation.py`, `test_simulation_smoke.py`
+
+**Verified by:** Run for this document: 253 passed, 4 deselected in 21.4 s. Four mutations each turn the suite red — `classify_host` made permissive (4 failures), `harden_agent` disabled (4), the rollback recount removed (1), the job deadlock reintroduced (8). The comment gap was found by grepping the suite and then confirmed against every database on disk. The three `integration` files ran together against live Ollama, Neo4j and real spawned processes for this document: **4 passed, 41 deselected in 22 m 46 s**.
 
 ---
 
