@@ -43,9 +43,9 @@ section below.
 | [6](#phase-6) | Simulation execution engine | 6 | **6 / 6** — 5 ✅, 1 ⚠️ |
 | [7](#phase-7) | Monitoring, data access, and agent interviews | 5 | **5 / 5** — 4 ✅, 1 ⚠️ |
 | [8](#phase-8) | Report generation | 4 | **4 / 4** — 2 ✅, 2 ⚠️ |
-| [9](#phase-9) | Frontend | 7 | _pending_ |
+| [9](#phase-9) | Frontend | 7 | **7 / 7** — 6 ✅, 1 ⚠️ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **41 / 53** |
+| | **Total** | **53** | **48 / 53** |
 
 ---
 
@@ -1763,99 +1763,304 @@ took two false passes here to land on a real one.
 
 > Specification: [line 837](REQ_SPEC.md#L837)
 
-**Status:** _pending_
+**Status:** ⚠️ Satisfied, with two findings recorded below
 
-**Required:** _pending_
+**Required:** Vue 3 + Vite. A router with views for Home/project list, the five-stage workflow and a run
+history browser. An API client module wrapping the backend with consistent error handling and
+polling helpers.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `frontend/` holds four runtime dependencies (vue, vue-router, pinia and — from Step 2 —
+cytoscape) and six dev dependencies. Nine routes are registered, all named after the resource:
+`/`, `/graphs/new`, `/graphs/:graphId`, `/simulations/:simId/{profiles,run,report/:reportId?,interview}`,
+`/runs`, and a catch-all. Every stage is bookmarkable.
 
-**Where:** _pending_
+The API client is split into ten modules — `client`, `polling`, `states`, `limits`, `ontology`,
+`profiles`, `scenario`, `influence`, `interview`, `index`.
 
-**Verified by:** _pending_
+**`awaiting_review` is a real fourth outcome and the polling machine knows it.** `isSettled` is
+`isTerminal(status) || isParked(status)`, and that is load-bearing: narrowing it to `isTerminal`
+alone fails **6 of the 17** polling tests, three of them by timing out at 5 s — a poller that only
+knows "running or terminal" spins forever on a task nobody is working on.
+
+**The seal holds at the frontend.** `scripts/verify_frontend.sh` reports **38/38** against the
+live stack: the shipped bundle names no external host, the container is refused when it reaches
+for the npm registry, it sits on `crowdsight_sealed` and **not** on the edge network, security
+headers are present on `/`, a deep link, `/index.html` and a missing asset alike, exactly one of
+each header reaches the browser, the gateway announces no version, and no CORS header is returned
+for an arbitrary origin. The mirrored limits match the server's live values — accepted file types,
+the 52,428,800-byte cap, and both platform action sets.
+
+**Finding 1: the contract check can pass without checking.** The "THE UI READS THE FIELDS THE API
+ACTUALLY SENDS" check runs an inline Python script and treats **empty stdout as success**
+(`[ -z "$shapes" ]`). The script walks six shapes in sequence with no error handling, so the first
+`urlopen` that raises ends it — the traceback goes to stderr, stdout is empty, and the check
+reports **PASS**. This is not hypothetical: on the first run for this document it crashed with
+`HTTPError: HTTP Error 409: CONFLICT` at the `profiles` fetch and still printed `[PASS] … every
+field the views read is present`, having verified only the graph-list entry and the
+simulation-list entry. `run-status`, the profiles envelope, the profile record and the report-list
+entry were never reached.
+
+The trigger is ordinary: the script asks about the **newest** simulation, and a simulation with a
+scenario but no population answers `409 has no population yet`. **18 of the 59 simulations on disk
+are in exactly that state** — every fork Phase 5's edit flow creates, and every `create` before
+`prepare`. Re-running once a prepared run was newest gave a clean 38/38 with no traceback, which
+is what makes it dangerous: it passes either way. Recorded, not fixed.
+
+**Finding 2: the per-content-type CSP does not reach the browser.** Flask differentiates exactly
+as described — a JSON response carries `default-src 'none'; base-uri 'none'; form-action 'none';
+frame-ancestors 'none'` with **no style allowance**, while the report HTML export adds
+`style-src 'unsafe-inline'; img-src data:` for its single `<style>` block. Measured inside the
+sealed network, both are correct. But the gateway hides the upstream copy and sets **one** policy
+for all of `/api/`, and it is the looser one: through the gateway a JSON response arrives carrying
+`style-src 'unsafe-inline'; img-src data:` it does not need. The gateway winning at the edge is
+deliberate and stated; the consequence — that the tightening exists in the backend and is flattened
+before a browser sees it — is not, and it is what a reviewer checking from a browser would find.
+No page is broken by it and `default-src 'none'` still holds.
+
+**Where:** `frontend/src/router/index.js`, `frontend/src/api/*.js` (10 modules), `frontend/src/App.vue`, `frontend/src/stores/workflow.js`; `scripts/verify_frontend.sh` (the contract check at lines 170-222); `backend/app/main.py` (`HTML_CSP`, `JSON_CSP`, `_security_headers`); `docker/gateway/conf.d/`
+
+**Verified by:** `npm test` — 247 pass. `scripts/verify_frontend.sh` — 38/38. `npm run test:e2e` — 80 pass in 2.0 min, 0 skipped. The polling machine mutation-tested: dropping the parked state from `isSettled` fails 6 of 17. Both findings were reproduced deliberately after being observed.
 
 ### 9.2 — Stage 1 — graph build
 
 > Specification: [line 882](REQ_SPEC.md#L882)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Upload UI (drag-drop, type and size validation client-side), ontology review and edit, extraction
+progress, and an interactive graph visualisation with type filtering and node inspection.
 
-**Satisfied by:** _pending_
+**Satisfied by:** One view, `GraphBuildView.vue`, with the phase derived from what exists rather than from a wizard
+position, plus `DropZone`, `OntologyEditor`, `GraphCanvas`, `TypeFilter` and `EntityInspector`.
 
-**Where:** _pending_
+**Cytoscape is genuinely lazy-loaded.** The built bundle carries `GraphCanvas-*.js` as a separate
+**447 KB** chunk against a 14 KB entry and a 98 KB vendor chunk, so only someone who opens a graph
+fetches it.
 
-**Verified by:** _pending_
+**The identifier rule is pinned by a shared fixture.** `backend/tests/fixtures/identifier_cases.json`
+is read by `backend/tests/test_ontology_generator.py` and by
+`frontend/tests/unit/ontology.spec.js` — **29 cases** (19 entity, 10 relationship), not the 30 the
+specification's prose says. Both suites assert against the same file, so the two implementations of
+`to_identifier` cannot drift silently. The cases include the one that corrected an assumption:
+`3rd sector` → `""`, because a label cannot begin with a digit, so the rule refuses rather than
+mangles. Also pinned: `council/committee` → `CouncilCommittee`, `café society` → `CafSociety`,
+`HTTPServer` unchanged, `  objects  to  ` → `OBJECTS_TO`.
+
+**Client-side validation is proved by the absence of a request.** `A REJECTED FILE IS NEVER
+UPLOADED` and `an empty file is refused before upload` both run in the browser, which is the only
+place that distinction can be made. The mirrored limits are checked against the running config by
+`verify_frontend.sh`, so a drifted mirror fails rather than surfacing as a late refusal.
+
+**The behaviours the step records are covered by name in the browser suite**:
+`REOPENING IT RESUMES THE REVIEW RATHER THAN THE UPLOAD FORM` (the 404-on-a-parked-graph bug),
+`shows the identifier a typed name will become`, `warns before an edit silently drops
+relationships`, and `HIDING A TYPE IS A TOGGLE, NOT A ONE-WAY TRIP`.
+
+**The whole stage runs against the live model** — `UPLOAD THROUGH REVIEW THROUGH EXTRACTION TO A
+DRAWN GRAPH` passed in **43.0 s**: a real document uploaded, an ontology proposed, edited and
+approved, extraction run, and a graph drawn.
+
+**Where:** `frontend/src/views/GraphBuildView.vue`; `frontend/src/components/{DropZone,OntologyEditor,GraphCanvas,TypeFilter,EntityInspector}.vue`; `frontend/src/api/{ontology,limits}.js`; `backend/tests/fixtures/identifier_cases.json`
+
+**Verified by:** `tests/unit/ontology.spec.js` (42) and `limits.spec.js` (30); `tests/component/{DropZone,refusals}.spec.js`; **14 browser tests** in `graph-build.spec.js`, all passing, including the 43 s live-model walk.
 
 ### 9.3 — Stage 2 — environment setup
 
 > Specification: [line 899](REQ_SPEC.md#L899)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Profile review: browse generated agents, inspect personas, see the named-versus-synthetic
+breakdown clearly, and edit or remove agents before the run.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `EnvironmentView.vue` with `ProfileCard`, backed by the `PUT /api/simulation/<sim_id>/profiles`
+endpoint this step had to add — the path was read-only before, so "edit or remove agents" was not
+possible at all.
 
-**Where:** _pending_
+**The whole population goes at once**, because `write_profiles()` rewrites `profiles.json`,
+`twitter.csv` and `reddit.json` together and renumbers `user_id`, which is the list index rather
+than an identity. Each entry carries the `user_id` it replaces; anything absent is removed; order
+decides the new numbering; and an unknown `user_id` is refused rather than invented, because a
+persona is generated, not typed.
 
-**Verified by:** _pending_
+**Three fields are immutable and the server enforces it rather than trusting the body.**
+`IMMUTABLE_FIELDS = ("provenance", "source_entity_uuid", "source_entity_type")` are overwritten
+from the stored record whatever arrived, and a `named` agent's `name` is held too, because it ties
+the agent to a real graph entity. Every merged entry then goes through `PersonaProfile` — the same
+validation as generation, so an operator cannot type a persona the generator could not have
+produced.
+
+The UI matches: `PROVENANCE IS SHOWN AS A FACT, NEVER AS AN INPUT` and `A NAMED AGENT OFFERS NO
+NAME INPUT, AND SAYS WHY` are browser tests, which is the point — offering an edit that is silently
+discarded looks like it worked.
+
+**Removal renumbers and the UI says so first**: `MARKING A REMOVAL EXPLAINS THAT IDS ARE
+RENUMBERED`, `a removal is staged, not applied`, `a removal can be taken back`, `discard restores
+everything`, and `an edit alone does not claim to renumber anything`. `SAVING AN EDIT PERSISTS IT
+AND RELOADS FROM DISK` covers both the save and the confirmation-wiped-by-reload bug. A locked run
+`cannot have its population edited` — the endpoint answers 409 on `meta.locked` and again on a
+running simulation.
+
+**Where:** `backend/app/api/simulation.py` — `IMMUTABLE_FIELDS` (556), `replace_profiles` (559); `frontend/src/views/EnvironmentView.vue`, `frontend/src/components/ProfileCard.vue`, `frontend/src/api/profiles.js`
+
+**Verified by:** `tests/unit/profiles.spec.js` (30) and the `ProfileCard` cases in `tests/component/refusals.spec.js`; **17 browser tests** in `environment.spec.js`, all passing.
 
 ### 9.4 — Stage 3 — simulation
 
 > Specification: [line 916](REQ_SPEC.md#L916)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Config review and edit, platform selection, round count, launch controls, and a live run view —
+progress bar, round counter, streaming action feed, per-agent activity.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `SimulationView.vue` holds the scenario and the run together, with `ConfigEditor`, `RunProgress`,
+`ActionFeed` and `AgentActivity`, driven by the `useRunMonitor` composable.
 
-**Where:** _pending_
+**Polling is tiered as described, and the code says why.** `STATUS_INTERVAL` is 2,000 ms for
+`run-status`; the action feed is walked forward from `next_offset` and never re-read
+(`feedOffset` "only ever moves up"); `timeline` and `agent-stats` refresh when
+`rounds_completed` changes rather than on a clock.
 
-**Verified by:** _pending_
+**The scenario rules are mirrored and tested.** Switching platform prunes the action set and names
+what it dropped (`SWITCHING PLATFORM PRUNES ACTIONS AND SAYS WHICH`, plus
+`TWITTER HAS NO COMMENTS AND REDDIT HAS NO REPOSTS` and `KEEPS ONLY THE ACTIONS THE NEW PLATFORM
+HAS` in the unit suite). `REFUSES AN EVENT SCHEDULED AFTER THE RUN ENDS` pins the off-by-one — the
+engine keeps `round <= rounds`, and the browser test `warns that an event scheduled past the end
+will never fire` covers the same boundary from the other side.
+`AN AGENT WITH NO PERMITTED ACTIONS CANNOT DO ANYTHING` and `catches an action left behind by a
+platform switch` cover the rest.
+
+The three bugs the step records are covered by name: `opens on the scenario for a run that has not
+started` (the 409-on-no-database banner), `FORKS, AND FOLLOWS THE EDIT TO THE NEW SIMULATION` (the
+fork notice destroyed by its own navigation), and the workflow store regression by
+`locks the stages a run has not reached` and `opens report and interview once a finished run is
+selected` in `shell.spec.js`.
+
+**A run is launched from the UI and watched to completion**: `STARTS FROM THE UI AND THE FEED
+FILLS AS IT GOES` passed in **1.2 min** against the live stack. `a completed run offers to resume
+from its checkpoint` covers the resume path, and `THE FEED CARRIES REAL ACTIONS, NOT ENGINE ROWS`
+pins Phase 7's engine-action exclusion at the UI.
+
+**Where:** `frontend/src/views/SimulationView.vue`, `frontend/src/composables/useRunMonitor.js`, `frontend/src/components/{ConfigEditor,RunProgress,ActionFeed,AgentActivity}.vue`, `frontend/src/api/scenario.js`
+
+**Verified by:** `tests/unit/scenario.spec.js` (27) and `tests/component/ConfigEditor.spec.js` (19); **18 browser tests** in `simulation.spec.js`, all passing, including the live launch.
 
 ### 9.5 — Stage 4 — report
 
 > Specification: [line 941](REQ_SPEC.md#L941)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Rendered report with charts (sentiment over rounds, action distribution, influence graph),
+citation links that jump to the underlying post, and export buttons.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `ReportView.vue` with `SentimentChart`, `ActionChart` and `CitationLink`.
 
-**Where:** _pending_
+**The backend addition this step needed is present and behaves as specified.**
+`?post_ids=4,12` returns exactly those two posts. The property that matters was checked at the
+layer that has it: `reader.posts(post_ids=[])` returns **0** — nothing rather than everything —
+while `post_ids=None` (no filter given) returns all 279. Over HTTP an empty query string means
+"no filter", which is the correct reading of an absent value; the empty-list case is what a UI
+passing a report's parsed citations actually produces.
 
-**Verified by:** _pending_
+**The charts are inspectable SVG, and the browser tests read the values** rather than confirming a
+canvas exists: `draws the sentiment chart as inspectable SVG`, `draws the action distribution with
+counts`, and `draws the influence graph from what agents did`. That last name is the honest one —
+the graph is derived from reposts and quotes, so it can disagree with the model's prose.
+
+**Citations resolve, and say so when they cannot**: `A CITATION OPENS THE POST IT POINTS AT`,
+`a citation says so plainly when the post cannot be found`, `a citation can be closed again`, and
+`every claim carries an evidence line or says it has none`.
+
+**The verification section is rendered first**, and `THE VERIFICATION SECTION IS ALWAYS RENDERED`
+asserts it even on a clean report — the same property Phase 8 Step 3 established server-side, held
+at the UI. Both exports are offered, `the markdown export downloads and is really markdown`, and
+`the html export is a standalone document`. `a run with no report offers to generate one rather
+than showing an empty page`.
+
+**Where:** `frontend/src/views/ReportView.vue`, `frontend/src/components/{SentimentChart,ActionChart,CitationLink}.vue`, `frontend/src/api/influence.js`; `?post_ids=` in `backend/app/api/simulation.py:950` and `run_reader.posts` (579-600)
+
+**Verified by:** `tests/unit/influence.spec.js` (18) and the `CitationLink` cases in `tests/component/refusals.spec.js`; **13 browser tests** in `report.spec.js`, all passing. The `post_ids` filter exercised live and at the reader.
 
 ### 9.6 — Stage 5 — interaction
 
 > Specification: [line 954](REQ_SPEC.md#L954)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Interview UI: pick an agent (or all), ask a question, view responses, browse interview history.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `InteractionView.vue`, built around the constraint that an interview needs a live worker.
 
-**Where:** _pending_
+**The refusal is shown, not hidden.** `SAYS WHY IT CANNOT BE ASKED, RATHER THAN HIDING THE FORM`,
+`every ask control is disabled`, and `points at stage 3, where the run can be restarted` — three
+separate browser tests, because "why can't I ask?" is the first question and an absent form makes
+the reader guess. A draft says nobody has been asked *yet*; a finished run says its agents are no
+longer in memory. `HISTORY IS STILL READABLE ON A FINISHED RUN` and `offers to filter history by
+agent` cover the durable half.
 
-**Verified by:** _pending_
+**A real agent answers a real question through the running worker**: `ASKS AN AGENT AND THE ANSWER
+LANDS IN HISTORY` passed in **45.7 s** against the live stack.
+
+**The interview window works and `interviewable` is reported separately from `state`.** The
+completed run reads `state: complete, interviewable: false` — two different questions, answered
+independently, which is what lets a UI use a window that a `state` check would refuse.
+`INTERVIEW_WINDOW_SECONDS` is 120 and is measured from the last question rather than from the end
+of the run.
+
+**One note carried forward from the specification, still open.** `interview_job` documents itself
+as "reporting as answers arrive", and it does not: it awaits `conduct` in a single
+`asyncio.to_thread` call and reports exactly twice, at `progress=0.05` and `progress=1.0`. The
+behaviour is fine and the UI does not depend on streaming; the docstring promises a granularity it
+does not deliver, and a UI built to show partial answers from it would show nothing until the end.
+Unchanged since the specification recorded it.
+
+**Where:** `frontend/src/views/InteractionView.vue`, `frontend/src/api/interview.js`; `backend/app/api/simulation.py` — `interview_job` (1063); `INTERVIEW_WINDOW_SECONDS` and `ControlServer.linger` in `simulation_ipc.py`
+
+**Verified by:** `tests/unit/interview.spec.js` (33); **8 browser tests** in `interaction.spec.js`, all passing, including the live interview and the draft-run case that owns its own simulation.
 
 ### 9.7 — Frontend test units
 
 > Specification: [line 997](REQ_SPEC.md#L997)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Component tests with Vitest for upload validation, config form validation, and polling state
+machines. One Playwright end-to-end test walking upload → graph → profiles → short run → report
+against a live sealed stack.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Both gaps the step's audit found are closed, and the numbers match the specification exactly.
 
-**Where:** _pending_
+**247 Vitest tests across 10 files, all passing in 0.6 s**: 197 module tests
+(`influence` 18, `interview` 33, `limits` 30, `ontology` 42, `polling` 17, `profiles` 30,
+`scenario` 27) and **50 component tests** that genuinely mount things —
+`DropZone` 16, `ConfigEditor` 19, and `refusals` 15 covering `OntologyEditor`, `ProfileCard` and
+`CitationLink`. `@vue/test-utils` and `happy-dom` are installed and used.
 
-**Verified by:** _pending_
+**The polling machine has four end states, not the three the specification's Step 7 wording
+asks for**, and the correction is real rather than editorial: `isSettled` includes `isParked`, and
+removing it fails 6 of the 17 polling tests including `STOPS ON awaiting_review RATHER THAN
+POLLING FOREVER` and `reports a parked task as parked, not as finished`.
+
+**81 Playwright tests across 7 files.** `npm run test:e2e` runs 80 of them — **all passed in
+2.0 min with nothing skipped**, despite 30 `test.skip` guards being present as fallbacks, because
+`tests/e2e/support.js` provisions what each spec needs rather than scavenging. The pipeline walk
+is held back behind `npm run test:e2e:pipeline` so the fast loop stays fast:
+`UPLOAD → GRAPH → PROFILES → RUN → REPORT` passed in **1.5 min**, inside the "under two minutes"
+the specification claims.
+
+**One coverage observation worth recording.** The backend vocabulary in `src/api/states.js` is not
+pinned by any Vitest test: renaming `RunState.COMPLETE` to the invented `'completed'` — the exact
+value the original bug used — leaves **all 247 passing**, because the module tests compare the
+constant against itself. What guards it is the browser test asserting every rendered run state is
+one of `draft`/`running`/`complete`/`failed`, and `verify_frontend.sh`'s field-by-field contract
+check. That is the right place for it — and it is also why 9.1's finding, that the same contract
+check can report PASS after crashing, matters more than it first looks.
+
+**Where:** `frontend/tests/unit/` (7 files, 197), `frontend/tests/component/` (3 files, 50), `frontend/tests/e2e/` (7 files, 81, plus `support.js`); `frontend/package.json` (`test`, `test:e2e`, `test:e2e:pipeline`)
+
+**Verified by:** Run for this document: `npm test` 247 passed in 0.6 s; `npm run test:e2e` 80 passed in 2.0 min, 0 skipped; `npm run test:e2e:pipeline` 1 passed in 1.5 min; `scripts/verify_frontend.sh` 38/38. Two mutations: dropping the parked state from `isSettled` fails 6 tests; renaming a `RunState` value fails none, which is recorded above rather than glossed.
 
 ---
 
