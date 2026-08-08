@@ -1081,8 +1081,33 @@ All four built and exercised against the live stack.
 
 **Cleanup will not delete a run something has been published about.** Every claim in a report cites post ids in that run's database; removing it turns each citation into a dead link while the report survives to be read, saying nothing about the evidence having gone. The reported set is read from disk rather than the API, so the protection still holds when the stack is down — which is exactly when someone is most likely to be tidying up. Dry run by default, and it prints why each survivor stayed. Drafts are kept too, which is deliberate rather than an oversight: the rule is "old *finished* runs", so unstarted work is never swept up, at the cost of stale drafts accumulating.
 
-**Step 5: Documentation**
+**Step 5: Documentation** ✅
 `README.md` (quick start), `docs/ARCHITECTURE.md` (component diagram and data flow), `docs/PROVISIONING.md` (the one-time internet-connected model pull, and how to re-seal afterwards), `docs/PRIVACY.md` (the allowlist, how sealing is enforced, how to verify it independently).
+
+All three written, and the README slimmed from 694 lines to 612 by **moving** the depth into them rather than restating it. Each document is now the authority on its subject and the README keeps a short summary with a link, so nothing is stated at length twice and nothing can drift out of step — a project that has already been bitten by a claim that was true when written and quietly stopped being so.
+
+**`PRIVACY.md` is written to be distrusted.** Every claim in it is followed by the command that checks it: the network flags, the missing default route, a by-hand connection attempt that fails, and the two `egress`-marked test files that make up the gate. It also states the one residual channel rather than hiding it — Docker's embedded resolver still answers external name lookups on the non-internal `edge` network, so the gateway can *resolve* names it cannot reach — and says why traffic capture is deliberately absent.
+
+**`PROVISIONING.md` leads with the two assets that fail quietly.** tiktoken's encodings and `Twitter/twhin-bert-base` are fetched lazily at runtime by dependencies rather than installed by pip. The second is the dangerous one: sealed and missing, the recommender fails and **every agent gets a degraded feed — a silently worse simulation rather than an error**. The NVIDIA toolkit procedure moved here whole from the README, including the driver-mismatch symptom that surfaces as a Docker mount error mentioning nothing about versions.
+
+**`ARCHITECTURE.md` documents the decisions, not just the boxes.** Component and data-flow diagrams in Mermaid, plus the things someone would otherwise have to rediscover: that the worker builds its own `Config` and the manager's object never reaches it, that the inference budget is divided by the *maximum* concurrent runs so a share never changes underneath a worker, that round boundaries are rowid high-water marks because OASIS has no concept of a round, and that a finished run's `state` and its `interviewable` flag are different questions.
+
+**The claims were verified rather than asserted: 8/8.** The documented duration matches `performance-baseline.json`, `internal: true` is what the network actually reports, the environment variables and baked asset directories are as described, the budget formula in the prose produces the number the API returns, and every internal link in every Markdown file resolves.
+
+---
+
+## Completion
+
+**All 53 steps across 10 phases are complete.** The suites as they stand:
+
+| Suite | Count | Needs |
+|---|---|---|
+| Backend unit | 1,514 | nothing |
+| Backend integration | 63 | Neo4j + Ollama |
+| Egress gate | 24 host / 17 in-container | the stack, and the source tree |
+| Frontend unit and component | 247 | nothing |
+| Browser | 80 + the pipeline walk | the stack |
+| Gateway and bundle checks | 38 | the stack |
 
 ---
 

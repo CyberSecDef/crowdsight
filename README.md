@@ -21,67 +21,30 @@ influential.
 
 ## Sealed by design
 
-CrowdSight is built for a fully sealed deployment. Every inference call runs against a
-local Ollama instance, all graph memory lives in a local Neo4j instance, and all
-simulation state lives in local SQLite files. There are no cloud services, no external
-memory providers, and no telemetry.
+Every inference call runs against a local Ollama instance, all graph memory lives in a
+local Neo4j instance, and all simulation state lives in local SQLite files. There are no
+cloud services, no external memory providers, and no telemetry.
 
-Network egress is denied at the **container-network level** — the Compose network is
-declared `internal: true`, which removes the default gateway — rather than merely avoided
-by configuration. The "nothing leaves the network" property is structurally enforced and
-independently verifiable, not a matter of trusting a config file.
+The guarantee is **structural, not behavioural**. Egress is denied at the
+container-network level — the Compose network is declared `internal: true`, which removes
+the default gateway — so a request to somewhere else fails whether or not anyone meant to
+make it, including from a dependency nobody audited. One stateless nginx gateway sits
+outside the seal to publish the ports; it holds no application code, no credentials and
+no data.
 
-One container is deliberately outside that seal: a stateless nginx **gateway**, which
-publishes the ports and reverse-proxies into the sealed network. It exists because a
-container on an `internal: true` network cannot be reached *from the host* either —
-reachability and egress are the same property — so the alternative would be giving the
-backend itself a route to the internet. The gateway holds no application code, no
-credentials and no data. Everything that touches a document, the knowledge graph, an LLM
-prompt or simulation data stays sealed.
+Check it yourself in about ten seconds:
 
-The only step requiring internet access is one-time provisioning (pulling model weights
-and packages), after which the stack runs sealed.
+```bash
+docker compose exec backend python -m app.egress_check
+```
 
-Provisioning includes assets that are easy to miss because they are fetched lazily at
-*runtime* by a dependency rather than installed by pip. Two of these exist, and both are
-baked into the image at build time:
+**→ [`docs/PRIVACY.md`](docs/PRIVACY.md)** — the complete allowlist, the four layers that
+enforce the seal, the one residual channel that is documented rather than hidden, and
+every command needed to verify all of it independently.
 
-- **tiktoken BPE encodings** (`TIKTOKEN_CACHE_DIR=/opt/tiktoken`). camel resolves one the
-  moment a `ChatAgent` is constructed. Sealed, that is a DNS failure and agent
-  construction dies before any model is contacted.
-- **`Twitter/twhin-bert-base`** (`HF_HOME=/opt/huggingface`). OASIS's Twitter platform
-  hardcodes `recsys_type="twhin-bert"` and pulls it the first time it builds a feed.
-  Sealed, the recommender fails and every agent gets a degraded feed — a silently worse
-  simulation rather than an error. Reddit uses no recommender model and is unaffected.
-
-`HF_HUB_OFFLINE=1` is set so a cache miss fails immediately rather than spending ~90
-seconds retrying against a DNS that cannot resolve. If you rebuild without a network,
-copy both directories forward.
-
-### Designated endpoints — the complete allowlist
-
-| Purpose | Endpoint | Protocol |
-|---|---|---|
-| LLM chat completions | `http://ollama:11434/v1` | OpenAI-compatible HTTP |
-| Text embeddings | `http://ollama:11434/api/embed` | Ollama native HTTP |
-| Knowledge graph | `bolt://neo4j:7687` | Bolt |
-| Simulation state | `./data/simulations/` | local filesystem |
-| Backend API | `http://localhost:5000` | HTTP (loopback/LAN) |
-| Frontend | `http://localhost:5173` (dev) / `:8080` (prod) | HTTP |
-
-Service names are the preferred form, and loopback (`localhost`, `127.0.0.1`, `::1`) is
-equally good outside Compose. A **private LAN address** — RFC 1918, link-local, or
-unique-local — is permitted where genuinely necessary, such as Ollama running on a
-separate GPU box, but it is second-best and CrowdSight says so out loud: every such
-endpoint logs a warning at startup, because traffic to another machine still leaves this
-host and the container-level egress seal cannot cover it. Public addresses and public
-hostnames are refused outright.
-
-Any other outbound destination is a defect. There is no third-party API key anywhere in
-this system. `LLM_API_KEY` exists because the OpenAI SDK requires a non-empty string; it
-defaults to the literal `ollama`, which Ollama ignores. It is settable so a local
-OpenAI-compatible gateway (LiteLLM, vLLM) can be given a token — a value that, like
-everything else here, never leaves the perimeter.
+**→ [`docs/PROVISIONING.md`](docs/PROVISIONING.md)** — the one time the network is needed,
+and two assets that are fetched lazily at runtime and degrade a simulation *silently* if
+they are missing.
 
 ---
 
@@ -211,26 +174,13 @@ cry wolf.
 ### Prerequisite: NVIDIA Container Toolkit
 
 Ollama takes the GPU by device reservation, so the toolkit must be installed or the
-`ollama` service will not start. That failure is deliberate — CPU-only inference is
-impractical for multi-hundred-agent runs, and silently falling back to it turns an
-overnight job into a multi-day one.
+`ollama` service will not start — deliberately, because silently falling back to CPU
+turns an overnight job into a multi-day one. The toolkit is not in Ubuntu's own
+repositories, and the kernel module and userspace driver must match.
 
-The toolkit is not in Ubuntu's own repositories; add NVIDIA's first.
-
-```bash
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-
-# verify
-docker info --format '{{.Runtimes}}' | grep -q nvidia && echo "runtime registered"
-docker run --rm --gpus all ubuntu:24.04 nvidia-smi --query-gpu=name --format=csv,noheader
-```
+**→ [`docs/PROVISIONING.md`](docs/PROVISIONING.md#the-gpu)** has the repository setup, the
+verification commands, and the driver-mismatch symptom, which is a Docker mount error that
+mentions nothing about versions.
 
 ### One-time provisioning (requires internet)
 
@@ -361,47 +311,15 @@ Document ─▶ Parse & chunk ─▶ Ontology ─▶ NER extraction ─▶ Neo4j
                                              Interviews (IPC)          Grounded report
 ```
 
-| Layer | Component | Network |
-|---|---|---|
-| Ingress | nginx reverse proxy, stateless | `edge` (publishes `:8080`, `:5000`) |
-| Inference | Ollama (`qwen2.5:14b`, `nomic-embed-text`) | `sealed` |
-| Graph memory | Neo4j 5.15+ over Bolt | `sealed` |
-| Simulation | CAMEL-AI OASIS (Apache 2.0), one OS process per run | `sealed` |
-| Run state | SQLite under `data/simulations/<sim_id>/` | `sealed` |
-| API | Flask | `sealed` |
-| UI | Vue 3 + Vite, Cytoscape.js / vis-network | `sealed` |
+Five containers: a stateless **gateway** publishing the ports, the **frontend** serving a
+compiled bundle, the **backend** API, **Ollama** holding the GPU, and **Neo4j** holding
+the graph. Every simulation runs in its own OS process, spawned rather than forked,
+independently killable and resumable from its last completed round.
 
-```
-host :8080 / :5000
-      |
-[ gateway ]  <- edge network, the only container with a route off-host
-      |
-======|====== sealed network (internal: true, no default gateway) ======
-      |
-[ frontend ] [ backend ] --> [ ollama ] [ neo4j ]
-```
-
-### Repository layout
-
-```
-backend/
-  app/
-    api/              # graph, simulation, report routes
-    services/         # ontology, graph builder, profiles, config, runner, report agent
-    storage/          # neo4j, embeddings, NER, search
-    utils/            # llm client, retry, file parser
-    config.py         # single source of truth; rejects off-host endpoints
-    main.py           # Flask entrypoint + health
-    egress_check.py   # proves the seal from inside the container
-  tests/
-  requirements.txt
-frontend/src/
-docker/gateway/       # nginx reverse-proxy config + placeholder page
-data/{uploads,graphs,simulations,reports}
-docker-compose.yml
-docker-compose.provision.yml
-Dockerfile
-```
+**→ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — component and data-flow diagrams,
+what each of the five stages owns, and the decisions worth knowing before changing
+anything: why the worker builds its own config, how the inference budget is divided, why
+round boundaries are rowid high-water marks, and why provenance cannot be edited.
 
 ---
 
@@ -671,10 +589,11 @@ alone even if it is old.
 
 | Document | Contents |
 |---|---|
-| [`REQ_SPEC.md`](REQ_SPEC.md) | Full requirements specification, all 10 phases |
-| `docs/ARCHITECTURE.md` | Component diagram and data flow |
-| `docs/PROVISIONING.md` | One-time model pull and how to re-seal afterwards |
-| `docs/PRIVACY.md` | The allowlist, how sealing is enforced, how to verify it |
+| [`docs/PRIVACY.md`](docs/PRIVACY.md) | The allowlist, the four layers that enforce the seal, and every command needed to verify it independently |
+| [`docs/PROVISIONING.md`](docs/PROVISIONING.md) | The one-time model pull, re-sealing afterwards, the GPU toolkit, and two assets that degrade a simulation silently if missing |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Component and data-flow diagrams, what each stage owns, and the decisions worth knowing before changing anything |
+| [`docs/performance-baseline.json`](docs/performance-baseline.json) | Measured timings for the standard workload, with the hardware they were measured on |
+| [`REQ_SPEC.md`](REQ_SPEC.md) | The full specification — every one of the 53 steps carries an account of what was found, including the defects |
 
 ---
 
