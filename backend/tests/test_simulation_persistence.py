@@ -353,3 +353,63 @@ def test_marks_survive_a_round_trip_as_json(ledger, oasis_db):
         raw = connection.execute(
             f"SELECT marks FROM {ROUND_TABLE} WHERE round = 1").fetchone()[0]
     assert json.loads(raw)["post"] == 1
+
+
+# --------------------------------------------------------------------------
+# Concurrent writers
+# --------------------------------------------------------------------------
+#
+# Two processes write a run's database: the OASIS engine as agents act, and
+# this ledger as rounds are checkpointed. SQLite's default rollback journal
+# makes a writer block everything for its whole transaction, and a checkpoint
+# that gives up loses the round boundary resume depends on.
+
+
+def test_THE_RUN_DATABASE_IS_IN_WAL_MODE(tmp_path):
+    """Rollback-journal contention took out a release gate twice in a day."""
+    import sqlite3
+
+    ledger = RunLedger(tmp_path / "simulation.db")
+    ledger.ensure_schema()
+
+    with sqlite3.connect(tmp_path / "simulation.db") as connection:
+        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal", mode
+
+
+def test_wal_survives_a_later_connection(tmp_path):
+    """The setting lives in the file, so the engine's own connection gets it."""
+    import sqlite3
+
+    ledger = RunLedger(tmp_path / "simulation.db")
+    ledger.ensure_schema()
+    # A completely separate connection, as the engine would open.
+    with sqlite3.connect(tmp_path / "simulation.db") as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS other (x INTEGER)")
+        assert str(connection.execute(
+            "PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+
+
+def test_A_CHECKPOINT_SUCCEEDS_WHILE_ANOTHER_WRITER_HOLDS_THE_FILE(tmp_path):
+    """The failure this exists to prevent: a checkpoint blocked out by the
+    engine and lost."""
+    import sqlite3
+
+    path = tmp_path / "simulation.db"
+    ledger = RunLedger(path)
+    ledger.ensure_schema()
+
+    other = sqlite3.connect(path, timeout=30.0)
+    other.execute("CREATE TABLE engine (x INTEGER)")
+    other.commit()
+    try:
+        # An open read transaction on another connection — in rollback-journal
+        # mode this is enough to block a writer.
+        other.execute("BEGIN")
+        other.execute("SELECT COUNT(*) FROM engine").fetchone()
+
+        ledger.record_round(RoundRecord(round=0, invoked=1, acted=1))
+        assert [r.round for r in ledger.rounds()] == [0]
+    finally:
+        other.rollback()
+        other.close()

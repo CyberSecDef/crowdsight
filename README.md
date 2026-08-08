@@ -441,7 +441,7 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 1547 tests: 1485 unit (no services, ~57s) and 62 integration against live
+The suite is 1551 tests: 1488 unit (no services, ~54s) and 63 integration against live
 Neo4j and Ollama (~2 min), including a real document upload driven through to a built
 graph, a real scenario derivation checked against the config schema, a three-agent
 two-round simulation driven end to end against local inference, a live run killed with

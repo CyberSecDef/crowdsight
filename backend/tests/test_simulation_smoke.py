@@ -270,5 +270,23 @@ async def test_create_prepare_start_completes_a_run(integration_config, workspac
 
     assert manager.capacity() == settings.MAX_CONCURRENT_SIMULATIONS, \
         "the slot was returned when the run finished"
+
+    # The socket is *deliberately* still held at this point: a finished run
+    # keeps its worker answering for a while so its agents can still be
+    # interviewed, and the slot is discounted rather than consumed. Asserting
+    # it had already gone was asserting the old lifecycle.
+    #
+    # Note the worker builds its own Config from the environment, so turning
+    # the window off through `settings` here would change nothing — which is
+    # exactly the trap this comment exists to save the next person from.
+    assert manager.is_lingering(meta.sim_id), \
+        "a finished run should still be answerable for interviews"
+
+    # Stopping ends the window immediately, and teardown is complete then.
+    manager.stop(meta.sim_id)
+    for _ in range(100):
+        if not (store.sim_dir(meta.sim_id) / "control.sock").exists():
+            break
+        time.sleep(0.1)
     assert not (store.sim_dir(meta.sim_id) / "control.sock").exists(), \
-        "the control socket was left behind"
+        "the control socket was left behind after the window closed"

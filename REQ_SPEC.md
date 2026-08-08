@@ -1017,8 +1017,22 @@ An interview needs the worker, and the worker exited the moment the run ended �
 
 ### Phase 10: Integration testing, egress verification, and operations
 
-**Step 1: Full pipeline integration test**
+**Step 1: Full pipeline integration test** ✅
 `tests/test_e2e_pipeline.py` — a fixture document runs the complete pipeline end to end (upload → graph → profiles → config → 3-agent/2-round simulation → report) against real local services. Marked `integration`, run before every release.
+
+Built as `tests/test_e2e_pipeline.py`, driven over HTTP against the running stack exactly as the UI drives it — the same shape as the existing live graph test rather than the service layer. It runs in **88 seconds**.
+
+**It asserts the handovers, not the stages.** Every stage already has tests proving it works; that is not what this is for. It checks that each stage's output actually feeds the next: that the named agents' `source_entity_uuid` values are a subset of the entities *this document* produced, that every actor in the run is a member of *that* population, and that every post the report cites is a post from *that* run — fetched back through the `post_ids` filter the citation links use. The regression this class of test exists to catch had already happened once: report generation broke against a finished run while every stage passed its own tests.
+
+**One of my own assertions was wrong, and instructively so.** The first version asserted that the grounding record's `unresolved` list was empty — that is, that the model never cites a post it invented. A local model does sometimes, and Phase 8's promise was never that it would not: it is that such a claim is **caught and dropped before the report is returned**. `unresolved` is the record of what the check caught, so an empty list asserts the model's luck rather than the system's guarantee. The test now checks the guarantee — that anything unresolved was accompanied by a dropped claim, and that every citation *surviving* in the report points at a post this run actually holds.
+
+**Kept alongside `test_simulation_smoke.py` rather than replacing it.** The smoke test runs create → prepare → start → complete from a fake graph id, so it exercises the engine without building a graph first and is the faster gate. They fail for different reasons.
+
+**Running it found two real problems.**
+
+The first was mine, from the interview window. The smoke test asserted the control socket was gone the instant a run completed — and that is no longer true by design, because a finished worker deliberately keeps answering so its agents can still be interviewed. The test now asserts the new lifecycle: the run is *lingering*, its slot is free, and stopping it releases the socket. Worth recording that **the worker builds its own `Config` from the environment**, so turning the window off through the manager's settings object changes nothing — a trap that cost a full test cycle to notice.
+
+The second was older and worse. `test_a_real_run_killed_mid_flight_resumes` failed with `sqlite3.OperationalError: database is locked` while checkpointing round 2, and the same error had taken out the smoke test earlier the same afternoon. It passed cleanly when run alone, so it is contention rather than a regression — but **a flaky release gate is not a gate**. The run database was in SQLite's default rollback-journal mode, where a writer blocks everything for the length of its transaction; two processes write that file, the OASIS engine as agents act and the ledger as rounds are checkpointed, and a checkpoint that gives up loses the round boundary resume depends on. The ledger now puts the database into **WAL** mode when it adds its table, which is stored in the file and so applies to the engine's own connections too.
 
 **Step 2: Egress verification suite**
 `tests/test_egress_verification.py` — the compliance gate. **Include the frontend container**, which `test_network_isolation.py` does not yet cover: it publishes no ports, has no default route, is on the sealed network and not the edge one, and is refused when it reaches for the npm registry. `scripts/verify_frontend.sh` asserts all four today, but a release blocker belongs in the gate. Assert the backend container has no route off-host; assert config validation rejects external URLs; assert no source file contains a non-allowlisted URL literal (grep the tree for `http(s)://` and diff against the allowlist); optionally capture traffic during a short run and assert every destination is in the allowlist. **Treat a failure here as a release blocker, not a warning.**

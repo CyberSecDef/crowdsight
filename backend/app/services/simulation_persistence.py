@@ -128,9 +128,28 @@ class RunLedger:
         return connection
 
     def ensure_schema(self) -> None:
-        """Add our table to the run's database. Safe to call repeatedly."""
+        """Add our table to the run's database, and put it in WAL mode.
+
+        Two processes write this file: the OASIS engine as agents act, and this
+        ledger as rounds are checkpointed. SQLite's default rollback journal
+        makes a writer block *everything* for the length of its transaction, so
+        a checkpoint can sit behind a round's worth of engine writes and give
+        up — `sqlite3.OperationalError: database is locked` mid-run, losing the
+        round boundary that resume depends on. It happened twice in one
+        afternoon on a loaded machine.
+
+        WAL lets readers and the writer proceed together and shortens the
+        windows in which anyone is blocked. The setting is stored in the file,
+        so it survives every later connection including the engine's own.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
+            # Not inside a transaction: journal_mode is a no-op within one.
+            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(mode).lower() != "wal":
+                logger.warning(
+                    "Could not put %s into WAL mode (got %r); concurrent "
+                    "checkpoints may contend with the engine", self.path, mode)
             connection.execute(CREATE_ROUND_TABLE)
 
     # -- marks --------------------------------------------------------------
