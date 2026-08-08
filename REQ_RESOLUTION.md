@@ -35,7 +35,7 @@ section below.
 
 | Phase | Title | Steps | Resolved |
 |---|---|---|---|
-| [1](#phase-1) | Foundation, sealed networking, and the configuration contract | 4 | _pending_ |
+| [1](#phase-1) | Foundation, sealed networking, and the configuration contract | 4 | **4 / 4** — 3 ✅, 1 ⚠️ |
 | [2](#phase-2) | Local service layer — Ollama and Neo4j clients | 5 | _pending_ |
 | [3](#phase-3) | Document ingestion and knowledge graph construction | 8 | _pending_ |
 | [4](#phase-4) | Agent profile generation | 5 | _pending_ |
@@ -45,7 +45,7 @@ section below.
 | [8](#phase-8) | Report generation | 4 | _pending_ |
 | [9](#phase-9) | Frontend | 7 | _pending_ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **0 / 53** |
+| | **Total** | **53** | **4 / 53** |
 
 ---
 
@@ -59,57 +59,151 @@ section below.
 
 > Specification: [line 80](REQ_SPEC.md#L80)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** The project skeleton — `backend/app/{api,services,storage,utils,models}`, `backend/tests`,
+`frontend/src`, `data/{uploads,graphs,simulations,reports}`, plus `docker-compose.yml`,
+`Dockerfile`, `backend/requirements.txt`, `backend/requirements-dev.txt`, `.env.example`,
+`README.md`; git initialised; `.gitignore` covering `.env`, `data/`, `__pycache__`,
+`node_modules` and `*.db`.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All eleven directories and all seven files exist, checked individually rather than by
+eye. All five `.gitignore` patterns are present. Git is initialised with 69 commits.
 
-**Where:** _pending_
+**Where:** Repository root. `backend/app/models/` exists as specified but is unused — the project
+puts pydantic models beside the services that own them (`app/services/profile_generator.py`,
+`app/services/report_agent.py`) rather than in a shared package. The directory was not
+removed, so the scaffold matches the spec literally.
 
-**Verified by:** _pending_
+**Verified by:** Directory and file existence checked one by one; `.gitignore` patterns matched by regex;
+`git rev-parse` and `git log`. Nothing here is covered by an automated test — it is
+structure, and its absence would fail every other test in the project.
 
 ### 1.2 — The configuration module
 
 > Specification: [line 83](REQ_SPEC.md#L83)
 
-**Status:** _pending_
+**Status:** ⚠️ Satisfied, with two recorded default changes
 
-**Required:** _pending_
+**Required:** `backend/app/config.py` as the single source of truth on `pydantic-settings`; every named
+setting with the specified default and type; `get_config()`/`reload_config()` raising a typed
+`ConfigError` rather than leaking pydantic's `ValidationError`; and a model validator that
+classifies every endpoint host and **refuses to start** on anything public, without ever
+resolving DNS.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Verified by constructing the configuration and reading each field back.
 
-**Where:** _pending_
+**Fifteen of seventeen named settings match the specification exactly**, including both
+`SecretStr` fields and `MAX_CONTENT_LENGTH` at 52,428,800.
 
-**Verified by:** _pending_
+**Two differ, and the change is recorded in the specification itself** (`REQ_SPEC.md`
+line 246): `CHUNK_SIZE` is 1500 rather than 500 and `CHUNK_OVERLAP` is 150 rather than 50.
+The reasoning is there — 500 characters is about three sentences, so a relationship stated
+across a sentence boundary was routinely severed, and chunk size sets ingestion cost because
+each chunk is one extraction call. Both remain configurable. This is a deliberate revision
+made during Phase 3, not drift.
+
+**The perimeter guarantee holds in full.** All fourteen classification cases from the
+specification's table return the documented class. Loopback and service names are accepted
+silently; a private address is accepted with exactly one `PerimeterWarning` and one entry in
+`perimeter_notes`; public hostnames, raw public IPs, a cloud Neo4j Aura URI and wrong schemes
+on both the LLM and Neo4j endpoints are all refused. A missing `NEO4J_PASSWORD` is refused
+rather than defaulted.
+
+**DNS is never consulted** — proven by replacing `socket.getaddrinfo` with a function that
+raises and constructing a configuration successfully.
+
+One nuance worth stating precisely: the `ConfigError` contract belongs to
+`get_config()`/`reload_config()`, which is what the specification says. Through those,
+*every* failure including a type error arrives as `ConfigError`. Constructing `Config()`
+directly surfaces pydantic's `ValidationError` for field-constraint violations, though
+perimeter refusals raise `ConfigError` even there.
+
+**Where:** `backend/app/config.py` — `Config`, `classify_host`, `ConfigError`, `PerimeterWarning`, `get_config`, `reload_config`
+
+**Verified by:** `backend/tests/test_config_validation.py` — 27 tests, including `classify_host` exercised
+directly as the specification asks, `test_classify_host_never_resolves_dns`,
+`test_entry_points_raise_config_error_not_validation_error`, and
+`test_config_error_reports_every_problem_at_once`. All pass.
+
+Independently re-verified for this document by driving `Config()` and `reload_config()`
+against every case in the specification's table.
 
 ### 1.3 — Sealed container networking
 
 > Specification: [line 102](REQ_SPEC.md#L102)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified, including the spec's own correction
 
-**Required:** _pending_
+**Required:** Five services on a bridge network declared `internal: true`; GPU passthrough for Ollama;
+a named volume, `NEO4J_AUTH` and heap settings for Neo4j; a stateless **gateway** on both
+networks as the single acknowledged boundary; masquerade disabled on `edge`; published ports
+bound to `127.0.0.1`; nginx resolving upstreams at request time with a placeholder on 502;
+and a `docker-compose.provision.yml` overlay for the one-time model pull.
 
-**Satisfied by:** _pending_
+**Satisfied by:** The deployed topology is exactly the diagram in the specification.
 
-**Where:** _pending_
+`sealed` is `internal: true`. `ollama`, `neo4j`, `backend` and `frontend` are on it and
+**publish no ports at all**. `gateway` alone spans `edge` and `sealed` and publishes
+`:8080` and `:5000`, both bound to `${CROWDSIGHT_BIND:-127.0.0.1}`. `edge` carries
+`com.docker.network.bridge.enable_ip_masquerade: "false"`.
 
-**Verified by:** _pending_
+Ollama has `deploy.resources.reservations.devices` with `driver: nvidia`, `count: all`,
+`capabilities: [gpu]`. Neo4j has the `neo4j_data` named volume, `NEO4J_AUTH` bound to a
+required `NEO4J_PASSWORD`, and configurable heap and page-cache settings.
+
+The gateway config sets `resolver 127.0.0.11 valid=10s ipv6=off` and serves
+`docker/gateway/placeholder.html` through `error_page 502 503 504 = @placeholder`.
+`docker-compose.provision.yml` attaches Ollama to a separate routable `provisioning`
+network and exists as a distinct file so using it is a deliberate act.
+
+**The frontend is no longer profile-gated**, which satisfies rather than deviates from the
+requirement: the gate was specified to last "until Phase 9 builds it", and Phase 9 Step 1
+built it.
+
+**Where:** `docker-compose.yml`, `docker-compose.provision.yml`, `docker/gateway/conf.d/default.conf`, `docker/gateway/placeholder.html`
+
+**Verified by:** `backend/tests/test_network_isolation.py` — `test_sealed_network_is_internal`,
+`test_backend_publishes_no_ports`, `test_gateway_has_no_outbound_tcp`, and
+`test_backend_has_no_default_route`. These inspect the Docker daemon, so they run host-side:
+**11 passed from the host.**
+
+Re-read from `docker compose config` for this document rather than from the file, so what is
+recorded is the resolved topology rather than the intent.
 
 ### 1.4 — Egress guard test unit
 
 > Specification: [line 127](REQ_SPEC.md#L127)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `tests/test_config_validation.py` covering acceptance, warnings, refusals, a missing
+required variable and field constraints, with `classify_host` tested directly;
+`tests/test_network_isolation.py` proving no outbound TCP, no external DNS, no default route
+and agreement with `app.egress_check`, detecting its context automatically. **It must not
+skip** — with no verifiable context it must fail with instructions. Topology assertions are a
+separate category that may skip in-container. Plus a `dev` build target and a `pytest.ini`
+with `--strict-markers`, `pythonpath = .` and the `integration` and `egress` markers.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Both files exist — 27 and 7 tests. **88 passed** in-container with 3 skipped, and those
+three are the topology assertions skipping with a message pointing at the host, which is what
+the specification asks for. From the host, all 11 pass for real.
 
-**Where:** _pending_
+**The non-skip property was proven rather than assumed.** Running the suite with `docker`
+genuinely absent from `PATH` — the unverifiable context the specification describes — produced
+**11 failed, exit code 1**. It goes red, not green. The file contains a single `pytest.skip`,
+at the topology guard the specification sanctions; every other unverifiable path is
+`pytest.fail` with instructions.
 
-**Verified by:** _pending_
+`egress` is deliberately *not* in the `addopts` deselection list, so the seal proof runs in the
+default suite and cannot become something anyone has to remember to ask for. The `dev` target
+exists in the `Dockerfile` and Compose builds `target: ${BACKEND_TARGET:-dev}`. `pytest.ini`
+carries `--strict-markers`, `pythonpath = .`, and all three markers registered with reasons.
+
+**Where:** `backend/tests/test_config_validation.py`, `backend/tests/test_network_isolation.py`, `backend/pytest.ini`, `Dockerfile` (`FROM base AS dev`), `docker-compose.yml`
+
+**Verified by:** The tests are themselves the verification. Run for this document in both contexts, plus the
+deliberate negative test of the non-skip property described above.
 
 ---
 
