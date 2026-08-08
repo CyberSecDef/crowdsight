@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import socket
 import warnings
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -31,6 +32,12 @@ from app.api.simulation import control as simulation_control_bp
 from app.config import ConfigError, PerimeterWarning, get_config
 
 DEFAULT_PORTS = {"http": 80, "https": 443, "bolt": 7687, "neo4j": 7687}
+
+#: Free space below which the health endpoint says so.
+MIN_FREE_GB = 5.0
+
+#: Everything a run writes lives under here.
+DATA_ROOT = Path(os.environ.get("CROWDSIGHT_DATA_ROOT", "data"))
 
 
 def _probe(url: str, timeout: float = 2.0) -> dict[str, Any]:
@@ -66,7 +73,68 @@ JSON_CSP = (
 )
 
 
+def _models_present(config: Any) -> dict[str, Any]:
+    """Are the models actually pulled, not just is Ollama answering?
+
+    Reachability and availability are different failures with the same
+    symptom. A sealed stack whose model was never pulled looks perfectly
+    healthy until the first inference call fails — and it cannot fix itself,
+    because pulling requires the internet the seal removes. That is worth
+    knowing at startup rather than three minutes into a run.
+    """
+    import json as _json
+    import urllib.request
+
+    wanted = {config.LLM_MODEL_NAME, config.EMBEDDING_MODEL}
+    base = config.LLM_BASE_URL.rstrip("/")
+    # /v1 is the OpenAI-compatible surface; the tag list is Ollama's own.
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=5.0) as response:
+            tags = _json.load(response)
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        return {"checked": False, "error": str(exc), "missing": sorted(wanted)}
+
+    # Ollama reports "qwen2.5:14b"; a config naming "qwen2.5" should match it.
+    present = {str(entry.get("name", "")) for entry in tags.get("models", [])}
+    bare = {name.split(":")[0] for name in present}
+    missing = sorted(
+        name for name in wanted
+        if name not in present and name.split(":")[0] not in bare
+    )
+    return {"checked": True, "present": sorted(present), "missing": missing}
+
+
+def _disk(path: str | Path) -> dict[str, Any]:
+    """Headroom where simulations are written.
+
+    A run that fills the disk mid-round loses the round it was writing, and
+    SQLite's error for that is not obviously about space.
+    """
+    import shutil as _shutil
+
+    try:
+        usage = _shutil.disk_usage(str(path))
+    except OSError as exc:
+        return {"checked": False, "error": str(exc)}
+    free_gb = usage.free / 1_073_741_824
+    return {
+        "checked": True,
+        "path": str(path),
+        "free_gb": round(free_gb, 1),
+        "total_gb": round(usage.total / 1_073_741_824, 1),
+        "percent_used": round(100 * usage.used / usage.total, 1),
+        # A 50-agent run writes tens of MB; the floor is for the operator, not
+        # the run, and gives time to act before anything actually fails.
+        "low": free_gb < MIN_FREE_GB,
+    }
+
+
 def create_app() -> Flask:
+    from app.logging_setup import configure
+
+    configure()
     app = Flask(__name__)
 
     # Same-origin in production: the gateway serves the UI and proxies /api
@@ -151,15 +219,30 @@ def create_app() -> Flask:
             "ollama": _probe(config.LLM_BASE_URL),
             "neo4j": _probe(config.NEO4J_URI),
         }
-        ready = all(check["reachable"] for check in checks.values())
+        models = _models_present(config) if checks["ollama"]["reachable"] else {
+            "checked": False, "error": "ollama is not reachable", "missing": []}
+        # Where simulations are written. Config has no setting for this — the
+        # runtime places it — so the check names the directory rather than
+        # inventing a config key that nothing else would read.
+        disk = _disk(DATA_ROOT)
+
+        reachable = all(check["reachable"] for check in checks.values())
+        # A missing model is not "degraded" politeness — nothing will run.
+        ready = reachable and not models.get("missing")
         payload = {
             "status": "ok" if ready else "degraded",
             "config": "valid",
             "perimeter_warnings": list(config.perimeter_notes),
             "checks": checks,
+            "models": models,
+            "disk": disk,
             "model": config.LLM_MODEL_NAME,
             "embedding_model": config.EMBEDDING_MODEL,
         }
+        if disk.get("low"):
+            payload["warnings"] = [
+                f"only {disk['free_gb']} GB free at {disk['path']}; a run that "
+                f"fills the disk loses the round it was writing"]
         return jsonify(payload), 200 if ready else 503
 
     return app

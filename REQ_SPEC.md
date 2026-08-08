@@ -1068,8 +1068,18 @@ Measured for real rather than extrapolated: **50 agents × 10 rounds, 26.6 minut
 
 **Extrapolated to the spec's headline figure**, 300 agents over 10 rounds is about six times this workload: **2.5–3 hours**, an overnight job. The README now leads with that, because the failure this step exists to prevent is someone starting a real run expecting a coffee break.
 
-**Step 4: Operational tooling**
+**Step 4: Operational tooling** ✅
 Health endpoint reporting Ollama reachability, Neo4j connectivity, model availability, and disk headroom. Structured JSON logging. A backup script for the Neo4j store and `data/`. A cleanup command for old simulation databases.
+
+All four built and exercised against the live stack.
+
+**The health endpoint gained the two checks that answer a different question from reachability.** A socket opening to Ollama says nothing about whether the model was ever pulled — and a sealed stack **cannot pull one**, because that needs the internet the seal removes. So a missing model now reports `degraded` rather than looking healthy until the first inference call fails. Disk headroom is the same shape of problem: a run that fills the disk loses the round it was writing, and SQLite's error for that is not obviously about space. Tag matching is deliberate — Ollama reports `nomic-embed-text:latest` for a config naming `nomic-embed-text`, and treating that as missing would be a false alarm on every healthy stack.
+
+**Logging is JSON on request, text by default.** The spec asks for structured logging and it is there behind `CROWDSIGHT_LOG_FORMAT=json`, with `sim_id` and `round` as real fields rather than a prefix to be parsed back out. Text stays the default because these logs are read by people: the worker prefixes every line with its `sim_id` precisely so a human can follow one run through a stack running two. The formatter serialises with `default=str`, so an unserialisable value in `extra` cannot raise inside logging and take down the run that was only trying to report progress.
+
+**Neo4j Community has no online backup, and this is the fact that shaped the backup script.** `neo4j-admin database dump` refuses outright while the database is in use — verified rather than assumed — and copying the volume underneath a running database can produce a file that looks fine and will not restore. The script stops the database for the dump, says so first, and restores it on any exit including an interrupt. It also refuses to run while a simulation is going, because a simulation database copied mid-round backs up a half-written round and the round bookkeeping resume depends on would be exactly the part that is wrong. Measured: 11 MB of `data/` and a 1.9 GB graph dump, with the database back and healthy afterwards.
+
+**Cleanup will not delete a run something has been published about.** Every claim in a report cites post ids in that run's database; removing it turns each citation into a dead link while the report survives to be read, saying nothing about the evidence having gone. The reported set is read from disk rather than the API, so the protection still holds when the stack is down — which is exactly when someone is most likely to be tidying up. Dry run by default, and it prints why each survivor stayed. Drafts are kept too, which is deliberate rather than an oversight: the rule is "old *finished* runs", so unstarted work is never swept up, at the cost of stale drafts accumulating.
 
 **Step 5: Documentation**
 `README.md` (quick start), `docs/ARCHITECTURE.md` (component diagram and data flow), `docs/PROVISIONING.md` (the one-time internet-connected model pull, and how to re-seal afterwards), `docs/PRIVACY.md` (the allowlist, how sealing is enforced, how to verify it independently).

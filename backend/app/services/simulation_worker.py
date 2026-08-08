@@ -393,11 +393,12 @@ def _install_stop_signal(loop: asyncio.AbstractEventLoop, sig: int,
 
 def worker_main(sim_id: str, sim_dir: str, concurrency: int | None = None) -> None:
     """Process entry point. Must be importable by name for ``spawn``."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"%(asctime)s [{sim_id}] %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    from app.logging_setup import configure
+
+    # The sim_id stays a prefix in text mode, exactly as before, and becomes a
+    # queryable field in JSON mode — which matters most here, since two runs
+    # log to the same stream.
+    configure(context={"sim_id": sim_id})
     try:
         asyncio.run(run_simulation(sim_id, sim_dir, concurrency=concurrency))
     except Exception:  # noqa: BLE001 - the exit code is what the manager reads

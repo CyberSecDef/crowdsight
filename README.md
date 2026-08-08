@@ -489,7 +489,7 @@ skips to pass: stop Neo4j and `pytest -m integration` errors rather than going g
 The image's `dev` build target carries pytest; production images are built with
 `--target runtime` and stay lean.
 
-The suite is 1560 tests: 1497 unit (no services, ~56s) and 63 integration against live
+The suite is 1577 tests: 1514 unit (no services, ~55s) and 63 integration against live
 Neo4j and Ollama (~2 min), including a real document upload driven through to a built
 graph, a real scenario derivation checked against the config schema, a three-agent
 two-round simulation driven end to end against local inference, a live run killed with
@@ -571,6 +571,82 @@ surface hours into a run), `test_action_space.py` (OASIS answers an unrecognised
 with a log line and a silently shorter tool list, so a typo yields an agent that simply
 never acts), `test_ollama_model_binding.py` (no code path can construct a cloud model),
 and `test_report_grounding.py` (every citation resolves to real run data).
+
+---
+
+## Operations
+
+### Health
+
+`GET /api/health` reports four things, and they fail differently:
+
+* **reachability** — can the backend open a socket to Ollama and Neo4j
+* **model availability** — are `qwen2.5:14b` and `nomic-embed-text` actually pulled.
+  Reachable is not the same as usable: a sealed stack whose model was never pulled
+  looks perfectly healthy until the first inference call fails, and it **cannot fix
+  itself**, because pulling needs the internet the seal removes. A missing model
+  makes the endpoint report `degraded`.
+* **disk headroom** — free space where runs are written. A run that fills the disk
+  loses the round it was writing, and SQLite's error for that is not obviously about
+  space.
+* **configuration** — validity and any perimeter warnings
+
+`GET /api/health/live` is the liveness probe Docker uses. It touches nothing and
+answers 200 while the process is up — a readiness check that failed because Ollama
+was busy would restart a container mid-simulation.
+
+### Logging
+
+Human-readable by default. Set `CROWDSIGHT_LOG_FORMAT=json` for one JSON object per
+line, with `sim_id`, `round` and anything else a caller attached as real fields rather
+than text to be parsed back out:
+
+```json
+{"time": "2026-08-08T13:14:26+0000", "level": "INFO", "logger": "app.services.simulation_runner",
+ "message": "Round 3: 27 acted, 18 quiet, 0 failed", "sim_id": "sim-20260808-013214-373656", "round": 3}
+```
+
+Text is the default on purpose: the worker prefixes every line with its `sim_id` so a
+human can follow one run through a stack running two, and that is how a long run is
+actually watched.
+
+### Backup
+
+```bash
+./scripts/backup.sh [destination]     # default ./backups
+```
+
+Captures `data/` (documents, simulation databases, profiles, reports, tasks), the Neo4j
+graph, and the configuration including `NEO4J_PASSWORD` — without which the dump cannot
+be restored into a working stack.
+
+**Neo4j is stopped for the length of the dump**, usually well under a minute. Community
+edition has no online backup: `neo4j-admin database dump` refuses outright while the
+database is in use, and copying the volume underneath a running database can produce a
+file that looks fine and will not restore. The script says so before it does it, brings
+the database back however it exits, and **refuses to start while a simulation is
+running** — a database copied mid-round backs up a half-written round.
+
+Models are deliberately not included: they are large, unchanging, and pulling them is
+the one-time provisioning step.
+
+### Cleaning up old runs
+
+```bash
+python scripts/cleanup.py                        # dry run, 30 days
+python scripts/cleanup.py --older-than 60 --delete
+```
+
+Dry run by default, because nothing here is recoverable: a run's database holds every
+post, action and interview it produced, and the model does not answer the same way
+twice.
+
+**A run that has been reported on is never deleted.** Every claim in a report cites
+post ids in that database, so removing it would turn each citation in a published
+document into a dead link while the report survives to be read. Also protected:
+anything running, anything still inside its interview window, and — deliberately —
+anything that is not a finished run, so a draft you have not got round to yet is left
+alone even if it is old.
 
 ---
 
