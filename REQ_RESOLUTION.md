@@ -41,11 +41,11 @@ section below.
 | [4](#phase-4) | Agent profile generation | 5 | **5 / 5** — 5 ✅ |
 | [5](#phase-5) | Simulation configuration generation | 4 | **4 / 4** — 3 ✅, 1 ⚠️ |
 | [6](#phase-6) | Simulation execution engine | 6 | **6 / 6** — 5 ✅, 1 ⚠️ |
-| [7](#phase-7) | Monitoring, data access, and agent interviews | 5 | _pending_ |
+| [7](#phase-7) | Monitoring, data access, and agent interviews | 5 | **5 / 5** — 4 ✅, 1 ⚠️ |
 | [8](#phase-8) | Report generation | 4 | _pending_ |
 | [9](#phase-9) | Frontend | 7 | _pending_ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **32 / 53** |
+| | **Total** | **53** | **37 / 53** |
 
 ---
 
@@ -1317,71 +1317,220 @@ comments and the other half of Phase 5's action space at the same time.
 
 > Specification: [line 682](REQ_SPEC.md#L682)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `GET /api/simulation/<id>/run-status` (state, current/total rounds, percent, action counts),
+`GET .../run-status/detail` (recent action log), `GET .../timeline` (per-round aggregates with an
+optional range), `GET .../agent-stats` (per-agent activity).
 
-**Satisfied by:** _pending_
+**Satisfied by:** All four answer 200 against a real completed run — 11 rounds, 50 agents — read live through the
+gateway.
 
-**Where:** _pending_
+`run-status` returns `state`, `round` 10 of `total_rounds` 10, `percent` 100.0, cumulative
+`action_counts` (`create_post` 132, `quote_post` 100, `refresh` 185, `repost` 47, `follow` 12,
+`like_post` 6, `do_nothing` 3), `last_round_actions`, and an `agents` block
+(`active_last_round` 30, `skipped_last_round` 20, `failed_last_round` 0). It also carries
+`interviewable` separately from `state`, because during the interview window they disagree.
 
-**Verified by:** _pending_
+**Every field comes from the run's own database.** The same endpoint served this finished run with
+no worker in existence at all — `live` was `null` and nothing else changed shape. The live block
+is enrichment: when the store says a run is in flight the worker is asked over the control socket,
+and a worker that does not answer yields `live_stale: true` with the reason rather than a poll
+that hangs.
+
+`timeline?from_round=3&to_round=5` returned exactly rounds 3, 4 and 5, each carrying `invoked`,
+`acted`, `failed`, `skipped`, `posts`, `comments`, `action_counts`, `events_fired`, `failures`,
+`seed` and `ended_at`. `run-status/detail` returned the newest actions with the round attributed
+from Phase 6's boundaries and the actor named.
+
+**The broadcaster is flagged, not counted.** `agent-stats` returned 51 rows, of which exactly one
+— `rbnewsnow` — carries `population: false`; `population_only=true` returned 50 and none. Each
+row reports `posts`, `actions`, `likes_given`, `likes_received`, `engagement_received`,
+`followers`, `following`, `provenance` and `activity_level`. The run had no silent agents
+(`silent: 0`), so the "reported with zeroes rather than omitted" rule is carried by
+`test_a_silent_agent_is_reported_rather_than_omitted` rather than by live data.
+
+**Aggregation runs over indexes we add.** All nine `crowdsight_*` indexes named in `INDEXES` are
+present on the real database. Creation is idempotent (`CREATE INDEX IF NOT EXISTS`) and wrapped so
+a locked database yields 0 rather than failing a status poll; reads use a 5 s busy timeout.
+
+The Phase 2 Cypher audit does catch this code, and the exemption is load-bearing rather than
+decorative: `audit_cypher_sources` over `app/` is clean today, and stripping the
+`# cypher-audit: ok` marker from `run_reader.py` produces exactly one finding, on the
+`CREATE INDEX` line. The identifiers go through an `identifier()` validator first, which refuses
+`'post; DROP TABLE user'`, `'post rowid'`, `'1post'` and `''`. The ledger's `rows_by_round` gets
+the same validation; it needs no marker because a `SELECT ... FROM` does not trip the Cypher
+heuristic.
+
+**Where:** `backend/app/services/run_reader.py` — `INDEXES` (47), `MAX_PAGE` (59), `identifier` (77), `ensure_indexes` (132), `identities` (164), `status` (218), `recent_actions` (270), `timeline` (312), `agent_stats` (344); `backend/app/api/simulation.py` — `_live_status` (754), `run_status` (777), `run_status_detail` (795), `timeline` (813), `agent_stats` (835)
+
+**Verified by:** `tests/test_monitoring_api.py` — **148 tests**. Exercised live against `sim-20260808-115939-aa2d35` for this document. The Cypher audit's `test_no_interpolated_cypher_in_the_source_tree` passes over the whole tree.
 
 ### 7.2 — Content access endpoints
 
 > Specification: [line 697](REQ_SPEC.md#L697)
 
-**Status:** _pending_
+**Status:** ⚠️ Satisfied, with one deliberate deviation
 
-**Required:** _pending_
+**Required:** Paginated `GET /api/simulation/<id>/actions` (**filter by platform**, agent, round),
+`GET .../posts`, `GET .../comments` (optionally filtered by post). Enforce sane page limits — a
+large run holds tens of thousands of rows.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All three are implemented and paginated, and share one envelope: `sim_id`, `count`, `total`,
+`limit`, `offset`, `has_more`, `next_offset`, `order`, plus the rows. A caller learns pagination
+once.
 
-**Where:** _pending_
+**The deviation: `platform` validates instead of filtering.** A simulation runs on exactly one
+platform and OASIS's trace table has no platform column, so there is nothing to filter on.
+Rather than accept the parameter and hand back an unfiltered set to a caller who believes they
+narrowed it, `platform=reddit` on this Twitter run answers **400** — *"This simulation runs on
+'twitter', not 'reddit'; every action in a run is on the same platform"* — while
+`platform=twitter` answers 200. In its place is `action=create_post,like_post`, which the spec's
+list has no equivalent for. This is a departure from the letter of the requirement, taken
+deliberately and recorded in the specification's own account of the step.
 
-**Verified by:** _pending_
+**Page limits are capped in the reader.** `limit=99999` came back as `limit: 500` (`MAX_PAGE`).
+An offset past the end is an empty page with 200 and `has_more: false`, not an error. `order`
+accepts `newest` and `oldest`.
+
+**Filters compose rather than override**, measured on the real run: `round=1` → 68,
+`agent=49` → 8, `action=quote_post` → 100, `round=1&agent=49` → 2,
+`round=1&agent=49&action=quote_post` → 0. A round with no recorded boundary (`round=99`) returns
+**0**, not everything — the failure that would read as "that round was enormous".
+
+**Engine bookkeeping is excluded by default**, and the arithmetic is exactly the population size:
+485 actions by default, 536 with `include_engine=true`, a difference of 51 — the 51 sign-ups for
+50 agents plus the broadcaster. The oldest entry flips from `create_post` to `sign_up` when they
+are included.
+
+Posts carry `kind` and `engagement` as claimed. Across the run: 132 `original`, 100 `quote`, 47
+`repost`. The seed post is `post_id` 1, round 0, `rbnewsnow`, `population: false`, engagement 34.
+`population_only=true` returns 278 of 279 and leaves nothing non-population behind.
+
+**Where:** `backend/app/services/run_reader.py` — `_page` (466), `_envelope` (498), `actions` (513), `posts` (569), `comments` (655), `_round_range` (449), `ENGINE_ACTIONS` (66); `backend/app/api/simulation.py` — `_check_platform` (892), `actions` (912), `posts` (939), `comments` (969)
+
+**Verified by:** `tests/test_monitoring_api.py`. Teeth confirmed by mutation: raising `MAX_PAGE` to a billion fails 5 tests including all three `test_the_cap_is_enforced_over_http` cases; emptying `ENGINE_ACTIONS` fails `test_ENGINE_BOOKKEEPING_IS_NOT_AGENT_ACTIVITY` and `test_the_recent_log_also_excludes_engine_bookkeeping`.
 
 ### 7.3 — Agent interview
 
 > Specification: [line 712](REQ_SPEC.md#L712)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `POST /api/simulation/interview` (ask one agent mid-run, in character, with its accumulated
+memory), `POST .../interview/batch`, `POST .../interview/all`, `POST .../interview/history`.
+Interviews route through the IPC channel into the live simulation process.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All four are registered and behave as described, checked against real runs on disk.
 
-**Where:** _pending_
+**History outlives the process.** `interview/history` on a run finished days ago returned three
+interviews with both halves intact — question and answer — attributed to the agent that gave them
+and to the round they happened in. The raw trace rows confirm OASIS stores the pair itself
+(`{"prompt": ..., "response": ..., "interview_id": ...}`), so no new storage was needed. Eight
+runs on disk carry interview traces and all are still readable.
 
-**Verified by:** _pending_
+It shares the paged envelope, filters by `agent` (agent 1 → 1 of the 3), and orders both ways.
+The `limit: 0` bug is fixed and stays fixed: a JSON body carrying `0` answers **400** *"limit must
+be at least 1 and offset at least 0"* rather than silently becoming 50 — the code comments the
+reason ("Explicit None checks, not `or`"). A bogus `order` is a 400 too.
+
+**A finished run refuses rather than reconstructs.** All three asking endpoints answer **409**:
+*"Agents and their memory live in the running process, so there is nobody to ask; past interviews
+are still..."*. Nothing is rebuilt from a persona.
+
+**An unknown agent is the caller's mistake, not ours.** `agent=99999` answers **404** —
+*"No interviewable agent 99999 in this simulation (ids 0-2)"* — naming the valid range, and it
+answers that before the not-running check, so a typo is never disguised as a transport failure.
+The broadcaster is excluded, having no persona to interview.
+
+The observation property is structural: OASIS's `perform_interview` builds the prompt from the
+agent's memory and calls the model directly rather than going through `astep`, so nothing is
+written back and questioning an agent does not change how it behaves afterwards. `batch` and
+`all` return a task id rather than holding an HTTP request open for three hundred completions;
+a single interview answers inline.
+
+**Where:** `backend/app/services/interview.py` — `history` (128), `_split` (178); `backend/app/api/simulation.py` — `_interview_request` (1001), `interview` (1012), `interview_job` (1063), `_submit_interview` (1099), `interview_batch` (1114), `interview_all` (1147), `interview_history` (1165)
+
+**Verified by:** `tests/test_interview.py` — **49 tests**, including one apiece for the two failure modes the real run found. Exercised live for this document against a finished run with recorded interviews.
 
 ### 7.4 — Environment health
 
 > Specification: [line 732](REQ_SPEC.md#L732)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `POST /api/simulation/env-status` (is the environment alive and accepting commands) and
+`POST /api/simulation/close-env` (graceful shutdown with timeout).
 
-**Satisfied by:** _pending_
+**Satisfied by:** Both are registered and answer live.
 
-**Where:** _pending_
+`env-status` on a finished run returned `{"status": "closed", "accepting_commands": false,
+"process_alive": false, "pid": null, "detail": "No process is holding this environment",
+"socket": ..., "state": "complete"}` — the three answers (`running`, `unresponsive`, `closed`)
+kept apart, with the recorded state alongside the probed one. The probe timeout is deliberately
+short and is asserted as such by `test_the_probe_timeout_is_short_enough_to_poll`. The case that
+matters — a process the operating system says is fine but which never answers its socket — is
+covered by `test_A_WEDGED_WORKER_IS_REPORTED_AS_UNRESPONSIVE` against a real spawned process.
 
-**Verified by:** _pending_
+`close-env` returned `{"closed": true, "outcome": "not running", "released": {"process": true,
+"socket": true, "database": true}, "leftovers": [], "was": "complete"}` — stop plus the
+verification a caller actually needs before archiving or deleting a run. An incomplete close is
+`207`, not `200`: `return jsonify(result), 200 if result["closed"] else 207`, covered by
+`test_AN_INCOMPLETE_CLOSE_IS_NOT_A_PLAIN_200`, with a locked database reported rather than hidden
+and a killed worker's stale socket cleaned up.
+
+The consistency gap is closed: both routes validate the simulation themselves, so an unknown id
+answers **404** from the route rather than depending on the manager to notice.
+
+**Where:** `backend/app/api/simulation.py` — `env_status` (1211), `close_env` (1233); `SimulationManager.env_status` (`simulation_manager.py:458`)
+
+**Verified by:** `tests/test_env_health.py` — **27 tests**, including `test_A_WEDGED_WORKER_IS_REPORTED_AS_UNRESPONSIVE`, `test_A_LOCKED_DATABASE_IS_REPORTED_NOT_HIDDEN`, `test_A_KILLED_WORKERS_SOCKET_IS_CLEANED_UP` and `test_an_unknown_simulation_is_a_404` for both routes. Both endpoints exercised live.
 
 ### 7.5 — Monitoring test units
 
 > Specification: [line 743](REQ_SPEC.md#L743)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `tests/test_monitoring_api.py` — every endpoint returns the documented shape; pagination
+boundaries are correct; filters compose. `tests/test_interview.py` — a single interview is
+attributed to the right agent; batch returns one result per request; a non-existent agent errors
+cleanly; an interview against a stopped simulation fails fast rather than hanging.
+`tests/test_ipc.py` — control messages round-trip; a timeout on an unresponsive process is
+handled without deadlocking the API.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All three exist and pass. With `test_env_health.py`: **250 passed, 0 deselected in 26.9 s** —
+monitoring 148, interview 49, IPC 26, env health 27. Nothing in Phase 7 is `integration`-marked,
+so the whole phase runs in the default loop.
 
-**Where:** _pending_
+**The shape contract is real, not incidental.** Ten shape tests name the required keys of every
+response and every element, `test_every_paged_endpoint_shares_one_envelope` is parametrised over
+all three paged endpoints, and `test_an_empty_result_keeps_its_shape` covers the case a UI would
+otherwise have to special-case. Required rather than exact, so adding a field stays compatible.
+Confirmed by mutation: dropping a single key (`next_offset`) from the envelope fails **9 tests**,
+including all three shape tests, all three envelope cases and a paging test.
 
-**Verified by:** _pending_
+`test_ipc.py` carries the round-trip tests plus what the spec asks for beyond them:
+`test_A_BLOCKED_CALL_DOES_NOT_STOP_OTHER_WORK`, `test_a_slow_handler_times_out_rather_than_waiting_forever`,
+`test_A_FAILING_HANDLER_DOES_NOT_KILL_THE_WORKER` and `test_a_stale_socket_file_does_not_block_a_restart`.
+
+**The admission control gate holds under measurement.** `MAX_INFLIGHT_CALLS` is 8 and
+`SLOT_WAIT_SECONDS` 0.25. Fired 24 concurrent calls at a worker that accepts connections and never
+replies: **all 24 resolved, none hung** — 8 held to their own 3 s client timeout, 16 refused with
+`ControlPlaneBusy` in at most **0.25 s**, total wall clock 3.0 s. The gate then drained, the next
+call reporting `WorkerUnreachable` rather than `ControlPlaneBusy`, so failed calls do not leak
+slots. Over HTTP this maps to a **503** with `retry_after`, covered by
+`test_a_busy_control_plane_is_a_503_over_http`.
+
+One note on how that was checked. The first mutation attempted here — raising `MAX_INFLIGHT_CALLS`
+to a million — did **not** turn the suite red, because the test fills whatever gate size it is
+given and then asserts the refusal. It discriminates "when full, refuse", not "the gate is
+bounded". Removing the gate outright (the client calling `_request` directly) fails
+`test_ENOUGH_BLOCKED_CALLS_ARE_REFUSED_RATHER_THAN_QUEUED`, which is the property that matters.
+
+**Where:** `backend/tests/test_monitoring_api.py` (148), `test_interview.py` (49), `test_ipc.py` (26), `test_env_health.py` (27); the gate in `backend/app/services/simulation_ipc.py` — `MAX_INFLIGHT_CALLS` (89), `SLOT_WAIT_SECONDS` (94), `ControlClient.request` (261); the 503 in `api/simulation.py:53`
+
+**Verified by:** Run for this document: 250 passed in 26.9 s. Three mutations turn the suite red — `MAX_PAGE` uncapped (5 failures), `ENGINE_ACTIONS` emptied (2), `next_offset` dropped from the envelope (9) — and removing the admission gate fails 1. The 24-call gate measurement was run against a real non-answering socket.
 
 ---
 
