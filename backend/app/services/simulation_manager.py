@@ -77,6 +77,12 @@ PROBE_TIMEOUT = 2.0
 SIGTERM_SECONDS = 10.0
 
 
+#: A run in one of these is over. Distinct from ``SimulationState.LOCKED``,
+#: which also contains ``running`` — locking is about whether the config may
+#: be edited, not about whether the work is done.
+FINISHED_STATES = frozenset({SimulationState.COMPLETE, SimulationState.FAILED})
+
+
 class CapacityError(RuntimeError):
     """No room to start another simulation."""
 
@@ -182,19 +188,69 @@ class SimulationManager:
         return worker_share(self.config)
 
     def capacity(self) -> int:
-        """How many more simulations may start right now."""
-        return max(0, self.config.MAX_CONCURRENT_SIMULATIONS - len(self.running()))
+        """How many more simulations may start right now.
+
+        Lingering workers do not count. One is holding its slot only so its
+        agents can still be interviewed, and its run is already finished — so
+        it yields the moment real work needs the room. Counting it would turn a
+        convenience into "no capacity" on a machine doing nothing.
+        """
+        return max(0, self.config.MAX_CONCURRENT_SIMULATIONS
+                   - len(self.running()) + len(self.lingering()))
+
+    def lingering(self) -> list[str]:
+        """Finished runs whose worker is still up for interviews.
+
+        The state on disk is the authority: the worker records its outcome
+        before it starts lingering, so a process that is alive for a run the
+        store calls finished is one holding the interview window open.
+        """
+        out: list[str] = []
+        for sim_id in self.running():
+            try:
+                state = self.store.load_meta(sim_id).state
+            except SimulationNotFound:
+                continue
+            # Finished, not merely locked: LOCKED includes `running`, and
+            # treating a live run as evictable would hand its slot away
+            # mid-round. A finished run whose process is still alive is either
+            # holding the interview window open or is an orphan; both yield.
+            if state in FINISHED_STATES:
+                out.append(sim_id)
+        return out
+
+    def is_lingering(self, sim_id: str) -> bool:
+        return sim_id in self.lingering()
+
+    def release_lingering(self, *, keep: str | None = None) -> list[str]:
+        """Stop workers that are only holding an interview window open."""
+        released: list[str] = []
+        for sim_id in self.lingering():
+            if sim_id == keep:
+                continue
+            logger.info("Releasing interview window on %s to free a slot", sim_id)
+            with contextlib.suppress(Exception):
+                self.stop(sim_id)
+            released.append(sim_id)
+        return released
 
     def budget(self) -> dict[str, Any]:
         """The arithmetic, so an operator can see where the budget went."""
-        running = len(self.running())
+        alive = self.running()
+        lingering = self.lingering()
+        # A lingering worker issues no requests: its run is over and it is only
+        # waiting to be asked something. Counting it in the worst case would
+        # overstate the GPU load an operator is looking at.
+        working = [sim_id for sim_id in alive if sim_id not in lingering]
         return {
             "llm_concurrency": self.config.LLM_CONCURRENCY,
             "api_reserve": self.config.API_LLM_RESERVE,
             "max_concurrent_simulations": self.config.MAX_CONCURRENT_SIMULATIONS,
             "per_worker": self.share,
-            "running": running,
-            "in_flight_worst_case": self.share * running + self.config.API_LLM_RESERVE,
+            "running": len(working),
+            "lingering": len(lingering),
+            "in_flight_worst_case": (self.share * len(working)
+                                     + self.config.API_LLM_RESERVE),
             "capacity": self.capacity(),
         }
 
@@ -279,6 +335,9 @@ class SimulationManager:
         # from them on its own. Starting it is the supported way to resume:
         # Step 3 built the machinery and nothing else exposed it.
         resuming = meta.state == SimulationState.FAILED
+        if self.capacity() < 1:
+            # Reclaim any interview window before refusing: those runs are over.
+            self.release_lingering(keep=sim_id)
         if self.capacity() < 1:
             raise CapacityError(
                 f"Already running {self.config.MAX_CONCURRENT_SIMULATIONS} "

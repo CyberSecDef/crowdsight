@@ -20,6 +20,7 @@ about processes; this file is about the channel between them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import tempfile
 import threading
@@ -404,3 +405,127 @@ def test_a_busy_control_plane_is_a_503_over_http(tmp_path, config, monkeypatch):
                                json={"sim_id": meta.sim_id})
     assert response.status_code == 503
     assert response.get_json()["retry_after"] == 1
+
+
+def _async_reply(payload):
+    """Handlers are awaited, so a plain lambda will not do."""
+    async def handler(request):
+        return payload
+    return handler
+
+
+# --------------------------------------------------------------------------
+# The post-run interview window
+# --------------------------------------------------------------------------
+#
+# An agent answers an interview from memory held in the worker process, so when
+# the worker exits the population becomes unreachable. Holding it open for a
+# while after the run ends gives an operator time to actually type a question.
+#
+# The window is measured from the *last command*, not from the moment the run
+# ended. A fixed window does not solve the problem it exists for: someone
+# mid-question at the deadline loses the worker just the same.
+
+
+async def test_the_window_closes_when_nobody_is_asking(tmp_path):
+    server = ControlServer(tmp_path / "c.sock")
+    server.handle("ping", _async_reply({"pong": True}))
+    await server.start()
+    try:
+        held = await server.linger(seconds=0.3, poll=0.05)
+        assert 0.25 <= held < 2.0, held
+    finally:
+        await server.close()
+
+
+async def test_a_zero_window_does_not_linger_at_all(tmp_path):
+    server = ControlServer(tmp_path / "c.sock")
+    await server.start()
+    try:
+        assert await server.linger(seconds=0) == 0.0
+    finally:
+        await server.close()
+
+
+async def test_USING_THE_WINDOW_KEEPS_IT_OPEN(tmp_path):
+    """The whole point: a slow typist must not lose the worker mid-question."""
+    import asyncio
+
+    server = ControlServer(tmp_path / "c.sock")
+    server.handle("ping", _async_reply({"pong": True}))
+    await server.start()
+
+    async def keep_asking():
+        client = ControlClient(server.path)
+        for _ in range(4):
+            await asyncio.sleep(0.15)
+            await asyncio.to_thread(client.request, "ping")
+
+    try:
+        asking = asyncio.create_task(keep_asking())
+        held = await server.linger(seconds=0.3, poll=0.05)
+        await asking
+        # Four pings 0.15s apart hold a 0.3s idle window well past 0.3s.
+        assert held > 0.5, f"the window closed while it was being used ({held})"
+    finally:
+        await server.close()
+
+
+async def test_a_command_resets_the_idle_clock(tmp_path):
+    import asyncio
+
+    server = ControlServer(tmp_path / "c.sock")
+    server.handle("ping", _async_reply({"pong": True}))
+    await server.start()
+    try:
+        await asyncio.sleep(0.1)
+        before = server.idle_for()
+        client = ControlClient(server.path)
+        await asyncio.to_thread(client.request, "ping")
+        assert server.idle_for() < before
+    finally:
+        await server.close()
+
+
+async def test_an_unknown_command_still_counts_as_use(tmp_path):
+    """Somebody is talking to this worker either way."""
+    import asyncio
+
+    server = ControlServer(tmp_path / "c.sock")
+    await server.start()
+    try:
+        await asyncio.sleep(0.1)
+        before = server.idle_for()
+        client = ControlClient(server.path)
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(client.request, "no-such-command")
+        assert server.idle_for() < before
+    finally:
+        await server.close()
+
+
+async def test_THE_WINDOW_ENDS_EARLY_WHEN_ASKED_TO_STOP(tmp_path):
+    """A stop must not wait out an interview window nobody is using."""
+    server = ControlServer(tmp_path / "c.sock")
+    await server.start()
+    try:
+        held = await server.linger(seconds=30, poll=0.05, should_stop=lambda: True)
+        assert held < 1.0, f"a stop waited {held}s for the window"
+    finally:
+        await server.close()
+
+
+async def test_the_socket_still_answers_during_the_window(tmp_path):
+    import asyncio
+
+    server = ControlServer(tmp_path / "c.sock")
+    server.handle("interview", _async_reply({"answer": "still here"}))
+    await server.start()
+    try:
+        window = asyncio.create_task(server.linger(seconds=0.4, poll=0.05))
+        client = ControlClient(server.path)
+        reply = await asyncio.to_thread(client.request, "interview")
+        assert reply["answer"] == "still here"
+        await window
+    finally:
+        await server.close()

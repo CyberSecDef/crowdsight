@@ -20,8 +20,10 @@ import {
   failedAnswers,
   fanOutWarning,
   groupByQuestion,
+  inInterviewWindow,
   isStartingUp,
   STARTING_UP_HINT,
+  WINDOW_HINT,
   succeededAnswers,
   validateQuestion,
   whyNotInterviewable,
@@ -37,6 +39,7 @@ const props = defineProps({ simId: { type: String, required: true } })
 const workflow = useWorkflowStore()
 
 const runState = ref('')
+const interviewable = ref(null)
 const profiles = ref([])
 const history = ref([])
 const question = ref('')
@@ -50,7 +53,8 @@ const error = ref(null)
 const filterAgent = ref('')
 const startingUp = ref(false)
 
-const live = computed(() => canInterview(runState.value))
+const live = computed(() => canInterview(runState.value, interviewable.value))
+const inWindow = computed(() => inInterviewWindow(runState.value, interviewable.value))
 const blockedReason = computed(() => whyNotInterviewable(runState.value))
 const problem = computed(() => validateQuestion(question.value))
 const grouped = computed(() => groupByQuestion(history.value))
@@ -67,6 +71,7 @@ async function load() {
       simulationApi.profiles(props.simId).catch(() => ({ profiles: [] })),
     ])
     runState.value = status?.state || ''
+    interviewable.value = status?.interviewable ?? null
     workflow.runState = runState.value
     profiles.value = population?.profiles || []
     await loadHistory()
@@ -164,6 +169,7 @@ async function refreshState() {
   const status = await simulationApi.runStatus(props.simId).catch(() => null)
   if (!status) return
   runState.value = status.state || ''
+  interviewable.value = status.interviewable ?? null
   workflow.runState = runState.value
 }
 
@@ -180,9 +186,12 @@ function watchState() {
     signal: stateWatch.signal,
     onUpdate: (value) => {
       runState.value = value?.state || ''
+      interviewable.value = value?.interviewable ?? null
       workflow.runState = runState.value
     },
-    done: (value) => runFinished(value?.state),
+    // Keep watching through the interview window: the run finishing is not the
+    // moment the agents become unreachable any more.
+    done: (value) => runFinished(value?.state) && !value?.interviewable,
   }).catch(() => {})
 }
 
@@ -206,6 +215,12 @@ watch(live, watchState)
     <p v-if="loading" class="dim">Loading…</p>
 
     <template v-else>
+      <!-- A finished run that is still answering -->
+      <div v-if="inWindow" class="window" role="status">
+        <strong class="small">Still answerable</strong>
+        <p class="small">{{ WINDOW_HINT }}</p>
+      </div>
+
       <!-- Why asking may not be possible -->
       <div v-if="!live" class="blocked" role="status">
         <strong class="small">Interviews need a live run.</strong>
@@ -389,6 +404,16 @@ select {
 }
 
 .blocked p { margin: 0.25rem 0 0; color: var(--text-dim); }
+
+.window {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--ok);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.6rem 0.9rem;
+}
+
+.window p { margin: 0.25rem 0 0; color: var(--text-dim); }
 
 .starting {
   margin: 0;

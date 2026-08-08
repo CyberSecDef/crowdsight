@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MAX_QUESTION_LENGTH,
   canInterview,
+  inInterviewWindow,
   failedAnswers,
   fanOutWarning,
   groupByQuestion,
@@ -22,12 +23,43 @@ import {
  */
 
 describe('when an interview is possible', () => {
-  it('only while the run is live', () => {
+  it('while the run is live', () => {
     expect(canInterview('running')).toBe(true)
   })
 
   it.each(['draft', 'complete', 'failed', ''])('not while %s', (state) => {
     expect(canInterview(state)).toBe(false)
+  })
+
+  it('A FINISHED RUN IS ANSWERABLE DURING ITS INTERVIEW WINDOW', () => {
+    /* The worker is deliberately held open after the run ends, so `complete`
+       and `answerable` come apart. Keying on state alone would refuse to use
+       the very window that exists for it. */
+    expect(canInterview('complete', true)).toBe(true)
+  })
+
+  it('trusts the server over the state either way', () => {
+    expect(canInterview('running', false)).toBe(false)
+    expect(canInterview('complete', true)).toBe(true)
+  })
+
+  it('falls back to the state when the field is absent', () => {
+    expect(canInterview('running', undefined)).toBe(true)
+    expect(canInterview('complete', null)).toBe(false)
+  })
+})
+
+describe('the interview window', () => {
+  it('is showing when a finished run is still answering', () => {
+    expect(inInterviewWindow('complete', true)).toBe(true)
+  })
+
+  it('is not a window while the run is simply running', () => {
+    expect(inInterviewWindow('running', true)).toBe(false)
+  })
+
+  it('is not showing once the worker has gone', () => {
+    expect(inInterviewWindow('complete', false)).toBe(false)
   })
 })
 

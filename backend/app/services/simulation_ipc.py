@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import socket
+import time
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,6 +136,10 @@ class ControlServer:
         self.path = Path(path)
         self._handlers: dict[str, Handler] = {}
         self._server: asyncio.AbstractServer | None = None
+        #: When the last command was answered, for the post-run idle window.
+        #: Monotonic, not wall clock: a clock adjustment must not shorten or
+        #: extend a window that exists to be predictable.
+        self.last_command_at: float = time.monotonic()
 
     def handle(self, command: str, handler: Handler) -> None:
         self._handlers[command] = handler
@@ -190,6 +195,9 @@ class ControlServer:
             else:
                 result = await handler(Request(command, payload.get("args") or {}))
                 reply = {"ok": True, "result": result}
+            # Any answered command counts as use, including an unknown one:
+            # somebody is talking to this worker either way.
+            self.last_command_at = time.monotonic()
         except json.JSONDecodeError as exc:
             reply = {"ok": False, "error": f"Malformed request: {exc}"}
         except Exception as exc:  # noqa: BLE001 - a bad request must not kill the run
@@ -198,6 +206,35 @@ class ControlServer:
 
         writer.write((json.dumps(reply) + "\n").encode("utf-8"))
         await writer.drain()
+
+    def idle_for(self) -> float:
+        """Seconds since the last command was answered."""
+        return time.monotonic() - self.last_command_at
+
+    async def linger(self, *, seconds: float, poll: float = 0.5,
+                     should_stop: Callable[[], bool] | None = None) -> float:
+        """Keep answering after the work is done, until nobody is asking.
+
+        The window is measured from the *last command*, not from the moment the
+        run ended. A fixed window after completion does not solve the problem
+        it exists for: someone mid-question at the deadline loses the worker
+        just the same, and the only lever is a longer wait for everybody. An
+        idle timeout means using the window keeps it open.
+
+        Returns how long it actually lingered, for the log.
+        """
+        if seconds <= 0:
+            return 0.0
+        started = time.monotonic()
+        # Reset first: the run itself may have been running for hours, and the
+        # window is about what happens *after* it.
+        self.last_command_at = started
+        while self.idle_for() < seconds:
+            if should_stop is not None and should_stop():
+                logger.info("Interview window for %s ended early", self.path.name)
+                break
+            await asyncio.sleep(poll)
+        return time.monotonic() - started
 
     async def close(self) -> None:
         if self._server is not None:

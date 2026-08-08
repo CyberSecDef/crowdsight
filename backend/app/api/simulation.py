@@ -781,8 +781,14 @@ def run_status(sim_id: str):
     total_rounds = (runtime.sims.load_config(sim_id).rounds
                     if runtime.sims.prepared(sim_id) else 0)
     reader = _reader(sim_id)
-    return jsonify(reader.status(meta=meta, total_rounds=total_rounds,
-                                 live=_live_status(sim_id)))
+    payload = reader.status(meta=meta, total_rounds=total_rounds,
+                            live=_live_status(sim_id))
+    # `state` is what the run is; `interviewable` is whether anyone can still
+    # be asked anything. They come apart during the interview window, when a
+    # finished run's worker is deliberately still answering — and a UI keyed
+    # on `state` alone would refuse to use the very window this opens.
+    payload["interviewable"] = runtime.manager.is_running(sim_id)
+    return jsonify(payload)
 
 
 @control.get("/<sim_id>/run-status/detail")

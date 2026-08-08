@@ -222,6 +222,20 @@ class Config(BaseSettings):
     #: interviews, graph queries and report generation while a run is in
     #: flight. Without it a saturated GPU makes the UI look dead.
     API_LLM_RESERVE: int = Field(default=1, ge=0)
+    #: How long a finished run keeps answering, measured from the last thing
+    #: asked of it rather than from the moment it ended.
+    #:
+    #: An agent answers an interview from memory held in the worker process,
+    #: so when the worker exits the population becomes unreachable and the only
+    #: way back is to restart the run. Holding it open costs no GPU at all —
+    #: the worker owns no VRAM, Ollama does — and an idle worker is an asyncio
+    #: loop on a socket. It costs memory (~1.8 GB at 20 agents, mostly fixed
+    #: import overhead) and, more importantly, one of the
+    #: MAX_CONCURRENT_SIMULATIONS slots. A lingering worker is evicted the
+    #: moment that slot is genuinely needed, so the window is free in practice.
+    #:
+    #: Zero disables it: the worker exits as soon as the run ends.
+    INTERVIEW_WINDOW_SECONDS: float = Field(default=120.0, ge=0)
     # The share of the population drawn from people the document names. A crowd
     # that is one-third councillors is not the crowd; documents name
     # office-holders, and a simulation of office-holders answers a different

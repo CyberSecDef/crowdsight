@@ -407,3 +407,94 @@ def test_capacity_is_enforced(manager, store, sim, spawned):
     another = store.create(SimulationConfig.model_validate(SCENARIO))
     with pytest.raises(CapacityError, match="maximum"):
         manager.start(another.sim_id)
+
+
+# --------------------------------------------------------------------------
+# The interview window and the concurrency slot
+# --------------------------------------------------------------------------
+#
+# A worker held open only so its agents can still be interviewed is still a
+# process, and processes are what capacity counts. But its run is over, so it
+# has nothing to lose by yielding — and counting it would produce "no capacity"
+# on a machine doing nothing.
+
+
+def _lingering(manager, store, sim, spawned, *, failed=False):
+    """A live process for a run the store already considers finished."""
+    manager._save_record(WorkerRecord(
+        sim_id=sim.sim_id, pid=spawned.pid,
+        start_time=process_start_time(spawned.pid)))
+    store.mark_started(sim.sim_id)
+    store.mark_finished(sim.sim_id, failed=failed)
+    return sim.sim_id
+
+
+def test_a_finished_run_with_a_live_process_is_lingering(manager, store, sim, spawned):
+    sim_id = _lingering(manager, store, sim, spawned)
+    assert manager.lingering() == [sim_id]
+    assert manager.is_lingering(sim_id)
+
+
+def test_A_RUNNING_SIMULATION_IS_NOT_LINGERING(manager, store, sim, spawned):
+    """LOCKED contains `running`; treating a live run as evictable would hand
+    its slot away mid-round."""
+    manager._save_record(WorkerRecord(
+        sim_id=sim.sim_id, pid=spawned.pid,
+        start_time=process_start_time(spawned.pid)))
+    store.mark_started(sim.sim_id)
+
+    assert manager.lingering() == []
+
+
+def test_a_failed_run_whose_process_survives_also_yields(manager, store, sim, spawned):
+    sim_id = _lingering(manager, store, sim, spawned, failed=True)
+    assert manager.lingering() == [sim_id]
+
+
+def test_LINGERING_DOES_NOT_CONSUME_CAPACITY(manager, store, sim, spawned):
+    _lingering(manager, store, sim, spawned)
+    manager.config = manager.config.model_copy(
+        update={"MAX_CONCURRENT_SIMULATIONS": 1})
+
+    assert manager.capacity() == 1, "a finished run was holding the slot"
+
+
+def test_a_live_run_does_consume_capacity(manager, store, sim, spawned):
+    manager._save_record(WorkerRecord(
+        sim_id=sim.sim_id, pid=spawned.pid,
+        start_time=process_start_time(spawned.pid)))
+    store.mark_started(sim.sim_id)
+    manager.config = manager.config.model_copy(
+        update={"MAX_CONCURRENT_SIMULATIONS": 1})
+
+    assert manager.capacity() == 0
+
+
+def test_STARTING_A_RUN_EVICTS_A_LINGERING_WORKER(manager, store, sim, spawned):
+    """The window is free in practice: you only lose it when you are starting
+    another run, which is exactly when you are not interviewing."""
+    lingering_id = _lingering(manager, store, sim, spawned)
+    manager.config = manager.config.model_copy(
+        update={"MAX_CONCURRENT_SIMULATIONS": 1})
+
+    released = manager.release_lingering()
+
+    assert released == [lingering_id]
+    assert not manager.is_running(lingering_id)
+
+
+def test_releasing_can_spare_one(manager, store, sim, spawned):
+    sim_id = _lingering(manager, store, sim, spawned)
+    assert manager.release_lingering(keep=sim_id) == []
+    assert manager.is_running(sim_id)
+
+
+def test_the_budget_separates_working_from_lingering(manager, store, sim, spawned):
+    """A lingering worker issues no requests; counting it would overstate the
+    GPU load an operator is looking at."""
+    _lingering(manager, store, sim, spawned)
+    budget = manager.budget()
+
+    assert budget["lingering"] == 1
+    assert budget["running"] == 0
+    assert budget["in_flight_worst_case"] == manager.config.API_LLM_RESERVE

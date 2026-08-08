@@ -14,11 +14,23 @@
 
 import { RunState } from './states.js'
 
-/** Interviews are only possible while the worker is up. */
-export const canInterview = (state) => state === RunState.RUNNING
+/**
+ * Whether anyone can be asked anything right now.
+ *
+ * Not the same as "is the run running". A finished run keeps its worker up for
+ * a while so its agents can still be interviewed, and during that window the
+ * run is `complete` but entirely answerable — a UI keyed on state alone would
+ * refuse to use the very window that exists for it. `run-status` reports
+ * `interviewable` for exactly this, and it is the authority; the state is only
+ * a fallback for a response that predates the field.
+ */
+export function canInterview(state, interviewable) {
+  if (interviewable !== undefined && interviewable !== null) return Boolean(interviewable)
+  return state === RunState.RUNNING
+}
 
 export function whyNotInterviewable(state) {
-  if (canInterview(state)) return ''
+  if (state === RunState.RUNNING) return ''
   if (!state) return 'This run has no status yet.'
   if (state === RunState.DRAFT) {
     return 'This run has not started, so there is nobody to ask yet.'
@@ -29,6 +41,15 @@ export function whyNotInterviewable(state) {
     'restarting the run in stage 3 would make its agents answerable again.'
   )
 }
+
+/** A finished run that is still answering, so the window can be shown. */
+export const inInterviewWindow = (state, interviewable) =>
+  Boolean(interviewable) && state !== RunState.RUNNING
+
+export const WINDOW_HINT =
+  'This run has finished, but its agents are still in memory and can be asked ' +
+  'questions for a short while. The window stays open as long as you keep ' +
+  'using it, and closes once nothing has been asked for a couple of minutes.'
 
 /** Asking everyone is a model call per agent. Say so before it happens. */
 export function fanOutWarning(count) {

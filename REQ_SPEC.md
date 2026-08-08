@@ -968,6 +968,30 @@ A short run finishes faster than a browser can click. The view read the state on
 
 The opposite case has the same error message and the opposite meaning: `start` returns as soon as the process is spawned, but the worker then builds the OASIS environment and only opens its control socket at the end of that. An interview in that gap gets "no worker listening" while the run is genuinely live and about to be answerable. The two are now told apart, and the second says to try again in a moment. **`env-status`'s `accepting_commands` is the precise signal** — a process being alive is not the same as its socket being open, and the browser test waits on the former rather than assuming the latter.
 
+#### Follow-up: the post-run interview window
+
+An interview needs the worker, and the worker exited the moment the run ended — so an operator who was mid-sentence lost the population and had to restart the run. **Measured before deciding whether that was worth changing**, during a live 20-agent run:
+
+| | |
+|---|---|
+| Worker process RSS | 1,772 MB |
+| Worker VRAM | **0 MB** — only Ollama holds VRAM (9.2 GB) |
+| Backend container CPU | 1.56%, and the worker spends it waiting on Ollama |
+
+**Holding a finished worker open costs no GPU whatsoever.** The worker is a Python process that makes HTTP calls; Ollama owns the card either way. An idle one is an asyncio loop parked on a socket. What it costs is memory — most of it fixed import overhead rather than per-agent — and, far more importantly, **one of the `MAX_CONCURRENT_SIMULATIONS` slots**. That is the real constraint, and it is what makes this cheap rather than free.
+
+**The window is measured from the last thing asked, not from when the run ended.** A fixed window does not solve the problem it exists for: someone mid-question at the deadline loses the worker just the same, and the only lever is a longer wait for everybody. An idle timeout means using the window keeps it open. `INTERVIEW_WINDOW_SECONDS` defaults to 120 and zero disables it.
+
+**A lingering worker yields its slot the moment one is needed.** Its run is over, so nothing is lost but the window — and this makes lingering free in practice: you only lose it when starting another run, which is exactly when you are not interviewing. `capacity()` therefore discounts lingerers and `start()` evicts them before refusing.
+
+**`state` and `interviewable` came apart, and that is the point.** During the window a run is `complete` and entirely answerable. Every check that asked "is it running" would have refused to use the very window this opens, so `run-status` now reports `interviewable` and the UI keys on that. The run is still marked complete immediately, so a report can be generated while the window is open and nothing waits on it.
+
+**Only on the good path.** A failed run's agents are in an unknown state, and holding them open would offer interviews of something broken.
+
+**A bug the existing tests caught immediately.** The first version asked whether a run was in `SimulationState.LOCKED` — which contains `running`. That made every live run look evictable, and would have handed a running simulation's slot away mid-round. Locking is about whether the config may be edited; it is not the same question as whether the work is done.
+
+**Verified against a real run: 14/14** — a run driven to completion, then interviewed twice afterwards, with both answers reaching the durable record, the budget reporting `running=0 lingering=1` with capacity intact, and `close-env` ending the window cleanly.
+
 **A note on the interview task's progress.** `interview_job` documents itself as "reporting as answers arrive", but it awaits `conduct` in a single thread call and reports only twice — at 5% and at 100%. Nothing is wrong with the behaviour; the docstring promises a granularity it does not deliver, and a UI built to stream partial answers from it would show nothing until the end.
 
 **Step 7: Frontend test units**

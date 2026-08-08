@@ -267,6 +267,22 @@ async def run_simulation(
         # A manager that finds a vanished process cannot tell the difference,
         # so it assumes the worse; this is what makes the good case good.
         _record_outcome(store, sim_id, failed=False)
+        # A run that finished cleanly keeps answering for a while, so its
+        # agents can still be interviewed. The outcome is already recorded, so
+        # the run reads as complete throughout — a report can be generated
+        # while the window is open, and nothing waits on it.
+        #
+        # Only on the good path: a failed run's agents are in an unknown state
+        # and holding them open would offer interviews of something broken.
+        if state.stage == "complete":
+            state.stage = "interviewable"
+            held = await server.linger(
+                seconds=config.INTERVIEW_WINDOW_SECONDS,
+                should_stop=lambda: state.stop_requested,
+            )
+            if held:
+                logger.info("Held %s open %.0fs for interviews", sim_id, held)
+            state.stage = "complete"
     finally:
         state.finished = True
         state.progress = ledger.progress(sim_config.rounds)
