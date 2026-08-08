@@ -39,13 +39,13 @@ section below.
 | [2](#phase-2) | Local service layer — Ollama and Neo4j clients | 5 | **5 / 5** — 5 ✅ |
 | [3](#phase-3) | Document ingestion and knowledge graph construction | 8 | **8 / 8** — 6 ✅, 2 ⚠️ |
 | [4](#phase-4) | Agent profile generation | 5 | **5 / 5** — 5 ✅ |
-| [5](#phase-5) | Simulation configuration generation | 4 | _pending_ |
+| [5](#phase-5) | Simulation configuration generation | 4 | **4 / 4** — 3 ✅, 1 ⚠️ |
 | [6](#phase-6) | Simulation execution engine | 6 | _pending_ |
 | [7](#phase-7) | Monitoring, data access, and agent interviews | 5 | _pending_ |
 | [8](#phase-8) | Report generation | 4 | _pending_ |
 | [9](#phase-9) | Frontend | 7 | _pending_ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **22 / 53** |
+| | **Total** | **53** | **26 / 53** |
 
 ---
 
@@ -840,57 +840,187 @@ for the same reason the egress tests do.
 
 > Specification: [line 467](REQ_SPEC.md#L467)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Derive from the graph and the document: the triggering event, a simulated time window and
+round cadence, seed posts, and scheduled mid-run events. Exactly two attributions —
+**broadcaster** (synthetic, name-checked against every graph entity) and **named_quote** (a
+line the document actually contains). Verify the quote by searching the text rather than
+trusting the label, with a minimum length; demote an unlocatable quote to the broadcaster
+and record the reason. Scheduled events `counterfactual: true`, `enabled: false`. Drop events
+past the final round, clamp rounds to `MAX_ROUNDS`, and normalise the broadcaster's name and
+handle rather than merely filling them.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Every clause holds, each probed by running it rather than reading it.
 
-**Where:** _pending_
+`find_verbatim()` flattens whitespace on both sides, lowercases, and returns offsets into the
+**original** document — a quote given as `WE  WERE\n NOT   consulted about the riverside
+DEVELOPMENT` located at `(38, 91)`, the same span as the exact text, and `DOC[38:91]` reads back as the real
+sentence. `"the plan"` (8 characters) and `"the council"` (11) are refused by the 12-character
+floor; a paraphrase of a sentence the document does contain returns `None`.
 
-**Verified by:** _pending_
+Attribution is a two-member `Literal`, so a third value cannot be constructed. `verify_scenario()`
+recomputes the span for every `named_quote` — the recorded offsets are never read — and
+`demote()` reassigns the post to the broadcaster, clears the speaker and offsets, and writes
+`demoted_reason`. Content is kept, not dropped. A post that is not a `named_quote` has any
+speaker and offsets stripped, so they cannot sit in the file looking like evidence.
+
+Scheduled events default `counterfactual=True, enabled=False`; `enabled_events()` on a freshly
+generated config returns `[]`, so a baseline run reflects the document alone. Events past the
+last round are dropped by the model validator (rounds 3 and 9 with `rounds=5` → `[3]` kept) and
+again by `set_rounds()`, which drops what it orphans — a bare `rounds` assignment leaves the
+round-3 event stranded, which is the defect `set_rounds()` exists to prevent.
+
+Rounds clamp twice: `min(rounds or MAX_ROUNDS, MAX_ROUNDS)` on the request and
+`set_rounds(min(config.rounds, rounds))` on the model's answer. `MAX_ROUNDS` is 10 here; a
+config asking for 999 lands on 10.
+
+The broadcaster normalises rather than fills: `{"name": "@RB Echo"}` → name `RB Echo`, handle
+`rb_echo`; `{"handle": "@RB_Echo"}` → `rb_echo` (no `@@`); punctuation collapses, and a
+40-character name is truncated to a 24-character handle.
+
+**Where:** `backend/app/services/simulation_config_generator.py` — `find_verbatim` (95), `Broadcaster` (142), `SeedPost` (173), `ScheduledEvent` (198), `SimulationConfig._events_fall_inside_the_run` (270), `set_rounds` (294), `demote` (398), `verify_scenario` (415), `SimulationConfigGenerator.generate` (530)
+
+**Verified by:** Probed live against the running backend: whitespace/case matching, offset fidelity, the 12-character floor, the paraphrase refusal, event dropping at both sites, the counterfactual defaults, the `MAX_ROUNDS` clamp and handle normalisation each confirmed by execution. Covered by `tests/test_simulation_config.py`. Mutating `find_verbatim` to trust the label — the exact defect the design exists to prevent — fails **21 tests** across generation, the operator edit and the fork path.
 
 ### 5.2 — Action space configuration
 
 > Specification: [line 485](REQ_SPEC.md#L485)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** The permitted action set per platform, matching OASIS's supported actions. Twitter:
+`CREATE_POST, LIKE_POST, REPOST, FOLLOW, QUOTE_POST, DO_NOTHING`. Reddit: `LIKE_POST,
+DISLIKE_POST, CREATE_POST, CREATE_COMMENT, LIKE_COMMENT, DISLIKE_COMMENT, SEARCH_POSTS,
+SEARCH_USER, TREND, REFRESH, FOLLOW, MUTE, DO_NOTHING`. Include `DO_NOTHING`. Validate up
+front, because OASIS warns and drops rather than raising.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `TWITTER_ACTIONS` is the spec's Twitter list **element for element, in order**.
+`REDDIT_ACTIONS` holds the same 13 members set-for-set, reordered so related actions sit
+together (post/comment, then votes, then search) — a presentation choice with no behavioural
+effect.
 
-**Where:** _pending_
+Checked against the installed camel-oasis, not against a remembered schema: `ActionType` has
+**32** members, `AGENT_INVOKABLE` mirrors **29**, `ENGINE_ONLY` names the other three
+(`EXIT`, `SIGNUP`, `UPDATE_REC_TABLE`), and `AGENT_INVOKABLE | ENGINE_ONLY == {a.name for a in
+ActionType}` is exactly true. Every configured action is a real `ActionType`, and `to_oasis()`
+returns real enum members.
 
-**Verified by:** _pending_
+Validation refuses, with a message that says why: `REPOST` on Reddit ("a valid OASIS action but
+not part of the reddit action set"), `EXIT` ("driven by the OASIS engine and has no agent
+tool"), `PURCHASE_PRODUCT` ("belongs to another OASIS scenario"), and `creat_post` ("is not an
+OASIS action; did you mean `'CREATE_POST'`?"). `DO_NOTHING` cannot be removed, and cannot stand
+alone. Case, whitespace and duplicates are normalised away first.
+
+Inactivity is modelled twice as described. `ACTIVITY_PARTICIPATION` is `{low: 0.20, moderate:
+0.55, high: 0.90}`; on a 300-agent crowd of 100 each, `select_active()` invoked **172** and
+saved **128** inferences in that round, against an expected 165. An unknown activity level
+falls to the middle (540/1000 at 0.55).
+
+`SimulationConfig.set_platform()` moves platform and action space together — a bare
+`platform = "reddit"` assignment leaves `action_space.platform == "twitter"`, which is the
+hazard, and a config carrying a mismatched pair is refused outright. A model-supplied
+`action_space` is discarded: `["CREATE_POST"]` comes back as the full Twitter set rather than
+failing validation for a missing `DO_NOTHING`, while the same value supplied with
+`context={"trusted": True}` is honoured.
+
+The sealed-network fix is in place: the `Dockerfile` bakes four BPE encodings into
+`TIKTOKEN_CACHE_DIR=/opt/tiktoken` at build time, and the running container holds all four.
+
+**Where:** `backend/app/services/action_space.py`; `SimulationConfig.set_platform` and `_the_model_does_not_choose_the_action_space` in `simulation_config_generator.py`; `Dockerfile:41-44`
+
+**Verified by:** `tests/test_action_space.py` — **45 tests**, four of which import the real `oasis` enum. Teeth confirmed by mutation: adding a phantom member to the mirror fails `test_our_mirror_of_the_enum_is_current`; removing `DO_NOTHING` from the Twitter set fails **14** tests.
 
 ### 5.3 — Config persistence and override
 
 > Specification: [line 502](REQ_SPEC.md#L502)
 
-**Status:** _pending_
+**Status:** ⚠️ Satisfied, with one limitation recorded below
 
-**Required:** _pending_
+**Required:** Write the config to `data/simulations/<sim_id>/config.json` and expose it for operator review
+and editing before the run. Re-verify an operator edit exactly as generated output is
+verified; refuse a `named_quote` edit when the document is unavailable; freeze a started run's
+config and fork an edit to a new `sim_id` recording `forked_from`; keep run state in `meta.json`
+outside the file the operator edits; write both atomically; rebuild a missing `meta.json`
+rather than 404; guard `sim_id` against path traversal; and serve the five HTTP routes, with a
+forked edit answering `201`.
 
-**Satisfied by:** _pending_
+**Satisfied by:** The layout, the paths and the split are as specified: `config.json` holds exactly the eleven
+scenario fields and no lifecycle at all, `meta.json` holds `state`, `created_at`, `started_at`,
+`finished_at`, `updated_at`, `edits`, `last_edit_changes` and `forked_from`. Both go through
+`_atomic_write` (temp file, then rename).
 
-**Where:** _pending_
+The edit path shares one implementation with generation. A fabricated quote carrying
+hand-written `source_start`/`source_end` was demoted to the broadcaster with the reason "the
+quoted text is not in the source document", its offsets cleared and the correction returned in
+`changes`; a genuine quote submitted with deliberately wrong offsets kept its attribution and
+had its span **recomputed** to `(38, 91)`. An edit carrying a `named_quote` with no document is
+refused ("the source document is not available to check it against"), while a broadcaster-only
+edit without one is accepted. Repointing at another graph is refused by name.
 
-**Verified by:** _pending_
+`SimulationState.LOCKED` is `{running, complete, failed}`. Editing a running simulation forked
+into a new `sim_id`, recorded `forked_from` on disk, and left the original's `event` byte-identical;
+editing the **fork** re-ran the same verification and demoted a fabricated quote there too.
+`describe()` reports `editable: true` while draft and `false` while running and when complete.
+
+`sim_id` is `sim-YYYYmmdd-HHMMSS-xxxxxx`, sorts chronologically, and two minted in the same
+second differ. `SIM_ID_PATTERN` refuses `../../etc`, a non-hex tail and a malformed id before
+any path is built. Over HTTP a well-formed-looking but invalid id answers
+`404 {"error": "Not a simulation id: ..."}`; a percent-encoded traversal never reaches Flask at
+all, because the gateway normalises the path first and the request lands on the SPA.
+
+Live over the gateway: `GET /api/simulations` 200; `GET /api/simulations/<id>` returns
+`config`, `meta`, `editable`, `prepared`, `summary`, `warnings`; `GET .../config` returns the
+scenario; `PUT .../config` on a completed run answered **201** with `forked: true` and the new
+`sim_id`. `TaskProgress.await_review()` takes `stage`, and the scenario job passes
+`stage="scenario_review"` against the ontology flow's default.
+
+**The limitation.** `load_meta()` rebuilds a missing `meta.json` from the config, as the
+specification asks — but the rebuilt record takes `SimulationMeta`'s defaults, so `state`
+returns to `draft`. Deleting the `meta.json` of a *running* simulation and reloading it yields
+`draft`, and with it `editable: true`: the freeze is enforced through a file that, if lost,
+un-freezes the run instead of failing closed. Both behaviours are specified individually; the
+interaction is not, and the rebuild is the weaker of the two. Not fixed here — this document
+does not change code — and it needs an outside deletion or disk loss to reach, since both files
+are written atomically by the same call.
+
+**Where:** `backend/app/services/simulation_store.py` — `SIM_ID_PATTERN` (69), `SimulationState.LOCKED` (82), `_atomic_write` (149), `load_meta` (276), `update_config` (316); `backend/app/api/simulation.py` — `derive_scenario_job` (90), `create_simulation` (130), `list_simulations` (172), `get_simulation` (179), `get_config` (184), `update_config` (189); `TaskProgress.await_review` in `services/tasks.py:266`
+
+**Verified by:** `tests/test_simulation_store.py` — 46 tests. Probed live for this document: fork-on-locked, `forked_from` on disk, the original left untouched, fork re-verification, the graph-repoint refusal, the withheld-document refusal, the traversal guard and the `201` over HTTP. The rebuild limitation was found by probing, not by reading. Mutating `find_verbatim` to trust the label fails `test_AN_OPERATOR_CANNOT_ATTRIBUTE_AN_INVENTED_QUOTE_TO_A_REAL_PERSON`, `test_hand_written_offsets_are_recomputed_not_believed`, `test_a_correction_is_reported_never_silent` and `test_a_fork_still_re_verifies`.
 
 ### 5.4 — Config test units
 
 > Specification: [line 519](REQ_SPEC.md#L519)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `tests/test_simulation_config.py` — generated config validates against the schema; round count
+respects `MAX_ROUNDS`; scheduled event rounds fall within the window. `tests/test_action_space.py`
+— only OASIS-supported actions appear; per-platform sets are correct; an unknown action is
+rejected at validation rather than at runtime.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Both files exist and all six named assertions have a test of their own.
 
-**Where:** _pending_
+Schema: `test_a_valid_scenario_parses`, plus a parametrised `test_an_unusable_scenario_is_refused`.
+`MAX_ROUNDS`: `test_the_model_cannot_exceed_max_rounds`, `test_a_caller_can_ask_for_fewer_rounds`,
+`test_a_caller_cannot_ask_for_more_than_max_rounds` (the ceiling binds without inflating a modest
+request) and `test_capping_rounds_also_drops_the_events_it_orphans`. Window:
+`test_events_past_the_last_round_are_dropped`, `test_every_surviving_event_falls_inside_the_window`,
+`test_set_rounds_drops_the_events_it_orphans`.
 
-**Verified by:** _pending_
+Action space: `test_the_spec_lists_are_what_we_ship` compares against the specification's own
+lists; `test_our_mirror_of_the_enum_is_current` and `test_oasis_drops_nothing_from_our_action_space`
+check the real installed enum; `test_an_unknown_action_is_rejected` and `test_a_near_miss_is_diagnosed`
+prove refusal happens at validation, with a suggestion.
+
+`test_simulation_config.py` holds **80** tests, two of them `integration`-marked, matching the
+specification's account. The two live-model tests pass against `qwen2.5:14b` — the second is the
+end-to-end safety property, that whatever the model claims, every surviving `named_quote` re-locates
+at exactly the recorded offsets with a speaker the document names.
+
+**Where:** `backend/tests/test_simulation_config.py` (80 tests), `backend/tests/test_action_space.py` (45 tests)
+
+**Verified by:** Run for this document: `test_simulation_config.py`, `test_action_space.py` and `test_simulation_store.py` together — **169 passed, 2 deselected in 4.05 s**. The two deselected integration tests then run against live `qwen2.5:14b`: **2 passed in 19.3 s**. Three independent mutations (phantom enum member, `DO_NOTHING` removed, quote label trusted) each turn the suite red.
 
 ---
 
