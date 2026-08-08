@@ -36,7 +36,7 @@ section below.
 | Phase | Title | Steps | Resolved |
 |---|---|---|---|
 | [1](#phase-1) | Foundation, sealed networking, and the configuration contract | 4 | **4 / 4** — 3 ✅, 1 ⚠️ |
-| [2](#phase-2) | Local service layer — Ollama and Neo4j clients | 5 | _pending_ |
+| [2](#phase-2) | Local service layer — Ollama and Neo4j clients | 5 | **5 / 5** — 5 ✅ |
 | [3](#phase-3) | Document ingestion and knowledge graph construction | 8 | _pending_ |
 | [4](#phase-4) | Agent profile generation | 5 | _pending_ |
 | [5](#phase-5) | Simulation configuration generation | 4 | _pending_ |
@@ -45,7 +45,7 @@ section below.
 | [8](#phase-8) | Report generation | 4 | _pending_ |
 | [9](#phase-9) | Frontend | 7 | _pending_ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **4 / 53** |
+| | **Total** | **53** | **9 / 53** |
 
 ---
 
@@ -217,71 +217,185 @@ deliberate negative test of the non-skip property described above.
 
 > Specification: [line 143](REQ_SPEC.md#L143)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `backend/app/utils/llm_client.py` wrapping the OpenAI SDK at `LLM_BASE_URL`, exposing
+`complete()` and `complete_json()`; async-first on `AsyncOpenAI` with a `SyncLLMClient`
+facade owning a long-lived loop on a background thread; `max_retries=0` to the SDK; three
+layers of JSON defence in cost order; `LLMJSONError` carrying every raw response and parser
+error; `schema` accepting either a pydantic model or a JSON Schema mapping, injected as a
+system message **appended** to any existing one.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Probed directly rather than read.
 
-**Where:** _pending_
+**Local salvage works without a round trip** — fenced, prose-wrapped, nested and
+top-level-array inputs all yield the embedded JSON, and a brace inside a string literal does
+*not* end the scan (`{"a": "} not the end", "b": 2}` survives intact). Genuinely broken input
+returns `None`, so the repair loop is entered only when it is actually needed.
 
-**Verified by:** _pending_
+**`LLMJSONError(attempts, errors)`** carries both lists in order.
+
+**Both schema forms work**: a pydantic class returns a validated instance, a mapping returns
+a validated dict, and a mapping violation reports every missing key at once rather than one
+per round trip.
+
+**The schema is appended, not substituted** — with an existing system prompt present, the
+result has one system message that still contains the original persona.
+
+`AsyncOpenAI` is constructed with `max_retries=0` and the comment naming `retry.py` as the
+owner of retry policy. `_LoopThread` provides the long-lived background loop for
+`SyncLLMClient`, and `test_sync_facade_survives_repeated_calls` guards the "Event loop is
+closed" failure the specification describes.
+
+**Where:** `backend/app/utils/llm_client.py` — `LLMClient`, `SyncLLMClient`, `_LoopThread`, `LLMJSONError`, `strip_code_fences`, `extract_json_candidate`, `_validate`, `_with_schema_instruction`
+
+**Verified by:** `backend/tests/test_llm_client.py` — 25 tests using `respx` to intercept real HTTP rather
+than substituting the client, so the SDK's own path is exercised. Named coverage includes
+`test_fenced_json_is_stripped_without_a_retry`,
+`test_prose_wrapped_json_is_salvaged_without_a_retry`,
+`test_server_rejecting_response_format_downgrades_once`,
+`test_existing_system_prompt_is_preserved` and `test_raises_after_exhausting_repairs`.
+All pass.
 
 ### 2.2 — Retry, timeout, and concurrency control
 
 > Specification: [line 158](REQ_SPEC.md#L158)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `backend/app/utils/retry.py` with exponential backoff and **full jitter**; `is_transient`
+true for connection resets, read timeouts, 429 and 5xx and false for other 4xx, re-raising
+the original exception; SDK imports local and guarded; a concurrency gate with one semaphore
+**per event loop**, acquired **inside** the retry loop, shared between chat and embeddings,
+exposing `in_flight`, `peak_in_flight`, `total_acquired` and `total_waited`; five new
+settings; and `retry_sync` alongside `retry_async`.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **The classifier was tested against constructed exceptions**, not read: connection reset,
+read timeout, connect error, 429, 500 and 503 all return `True`; 400, 404 and 422 all return
+`False`.
 
-**Where:** _pending_
+**Backoff is genuinely jittered** — twelve draws at the same attempt number produced twelve
+distinct delays. An undithered implementation would have produced one.
 
-**Verified by:** _pending_
+**The bound is observed, not assumed.** Twenty concurrent workers against a limit of 4 gave
+`peak_in_flight=4`, `total_acquired=20`, `total_waited=16`.
+
+**Semaphores are per loop**, keyed by `id(asyncio.get_running_loop())` — running the gate
+from two different loops created two semaphores, which is what makes `SyncLLMClient`'s
+background loop safe.
+
+**The gate is acquired inside the retry loop.** It is not referenced in `retry_async` at
+all; acquisition happens in `LLMClient._send`'s inner `attempt()` coroutine, which
+`retry_async` calls. Backoff therefore happens outside the gate, so a coroutine sleeping
+through a retry holds no slot. This is the correct shape for the requirement even though it
+places the acquisition at the call site rather than in `retry.py`.
+
+**SDK imports are guarded** via `_maybe_import`, with `openai`, `httpx` and `neo4j.exceptions`
+resolved by name at classification time; none is imported at module top.
+
+All five settings match their specified defaults exactly. `retry_sync` and `retry_async` are
+both present.
+
+**Where:** `backend/app/utils/retry.py` — `retry_async`, `retry_sync`, `is_transient`, `ConcurrencyGate`, `get_llm_gate`, `RetryPolicy`, `_maybe_import`; gate acquisition in `backend/app/utils/llm_client.py::LLMClient._send`
+
+**Verified by:** `backend/tests/test_retry.py` — 24 tests covering backoff timing, the retry ceiling and the semaphore bound. All pass. Re-verified for this document by driving the gate with 20 concurrent workers and inspecting the counters.
 
 ### 2.3 — Embedding service
 
 > Specification: [line 173](REQ_SPEC.md#L173)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `backend/app/storage/embedding_service.py` calling `/api/embed` (not `/api/embeddings`)
+with `nomic-embed-text`, returning 768-dim vectors; batching; an on-disk SQLite cache at
+`data/cache/embeddings.db` storing raw float32 blobs with WAL, called from a worker thread;
+keyed on `sha256(model|dim|text)`; fresh vectors quantised to float32; dimensionality
+validated; duplicates collapsed within a call; four new settings; and an explicit
+`cache=None` meaning "no cache", distinct from the argument being omitted.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `/api/embed` is the endpoint, with the legacy `{"embedding": [...]}` shape read defensively
+as a fallback.
 
-**Where:** _pending_
+**The cache key genuinely includes the model and the dimension** — verified by computing
+keys for the same text under a different model and a different dimension and confirming all
+three differ. A model swap therefore misses rather than returning a vector from another
+vector space.
 
-**Verified by:** _pending_
+WAL, `asyncio.to_thread`, float32 quantisation, dimension validation and within-call
+deduplication are all present.
+
+**The `cache=None` distinction is implemented with a sentinel** — the default is a module-level
+`object()`, so an explicitly passed `None` is distinguishable from omission and caching can
+actually be disabled. All four settings match: `EMBEDDING_DIM` 768, `EMBEDDING_BATCH_SIZE` 32,
+`EMBEDDING_CACHE_PATH` `data/cache/embeddings.db`, `EMBEDDING_CACHE_ENABLED` true.
+
+**Where:** `backend/app/storage/embedding_service.py` — `EmbeddingService`, `EmbeddingCache`
+
+**Verified by:** `backend/tests/test_embedding_service.py` — 24 tests covering dimensionality, batch splitting and the cache returning without a second HTTP call, using `respx`. All pass.
 
 ### 2.4 — Neo4j storage layer
 
 > Specification: [line 190](REQ_SPEC.md#L190)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `neo4j_storage.py` (pooling, session management, parameterised Cypher only) and
+`neo4j_schema.py` (constraints, indexes, a vector index if supported, otherwise in-process
+cosine); an async driver, one storage per process, records materialised before the session
+closes; `escape_identifier` **validating** against `^[A-Za-z_][A-Za-z0-9_]{0,62}$`;
+`audit_cypher_sources` working on the AST and matching Cypher-only keywords; vector-index
+support established by trying and reading `SHOW INDEXES` back; `cosine_similarity` returning
+`0.0` for a zero-magnitude vector; three new settings.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **`escape_identifier` was tested against eight cases**: `Person`, `_x9` and a 63-character
+name accepted; a 64-character name, `My Label; DROP`, `9lives`, an empty string and
+`has-dash` all rejected. It validates rather than sanitises, as specified.
 
-**Where:** _pending_
+**`cosine_similarity` returns exactly `0.0`** for a zero-magnitude vector — no NaN to
+propagate into a ranking — with 1.0 for identical and 0.0 for orthogonal vectors. It lives in
+`neo4j_schema.py` rather than `neo4j_storage.py`, which matches the specification's own
+sentence placing in-process cosine with the index concern.
 
-**Verified by:** _pending_
+**`audit_cypher_sources` walks the AST**, honours the `# cypher-audit: ok` marker, and keys
+on the six Cypher-only keywords (`MATCH`, `MERGE`, `UNWIND`, `YIELD`, `DETACH`, `RETURN`)
+without triggering on SQL-shared `WHERE` — confirmed by inspecting the function body. **Run
+over the whole shipped tree it reports zero interpolated Cypher.**
+
+Vector-index support is established by attempting creation and reading `SHOW INDEXES` back to
+confirm the type is `VECTOR`, not by parsing a version string. All three settings match:
+`NEO4J_DATABASE` `neo4j`, `NEO4J_MAX_POOL_SIZE` 50, `NEO4J_CONNECTION_TIMEOUT` 30.
+
+**Where:** `backend/app/storage/neo4j_storage.py` — `Neo4jStorage`, `escape_identifier`, `audit_cypher_sources`; `backend/app/storage/neo4j_schema.py` — schema DDL, vector-index probe, `cosine_similarity`
+
+**Verified by:** `backend/tests/test_neo4j_storage.py` — 21 tests, of which 11 are `integration`-marked and run
+against the live Compose Neo4j. **10 unit + 11 integration, all pass.** The audit, identifier
+and cosine tests are deliberately *not* integration-marked, as the specification requires.
 
 ### 2.5 — Service client test units
 
 > Specification: [line 210](REQ_SPEC.md#L210)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Four test files — `test_llm_client.py` (respx, not object substitution),
+`test_embedding_service.py`, `test_neo4j_storage.py` (live Neo4j, namespaced by `graph_id`,
+not testcontainers) and `test_retry.py`. Only server-dependent tests marked `integration`;
+neither marker ever skips to pass.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All four exist: 25, 24, 21 and 24 tests. **125 pass in the default run with 11 deselected;
+those 11 are exactly the `integration`-marked Neo4j tests, and they pass against the live
+server.**
 
-**Where:** _pending_
+`respx` is used in the LLM and embedding suites, so the SDK's real HTTP path is exercised
+rather than a stub proving the code calls the stub.
 
-**Verified by:** _pending_
+**The marker policy holds where it matters**: `test_neo4j_storage.py` carries all 11
+integration marks and the other three files carry none — the identifier, source-audit and
+cosine tests run in the default loop, which is what the specification asks for.
+
+**Where:** `backend/tests/test_llm_client.py`, `test_embedding_service.py`, `test_neo4j_storage.py`, `test_retry.py`
+
+**Verified by:** Run for this document in both modes: 125 passed / 11 deselected unit, then 11 passed integration against the live Neo4j.
 
 ---
 
