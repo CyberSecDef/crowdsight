@@ -60,9 +60,22 @@ export async function provision(request, { agents = 4, rounds = 2 } = {}) {
   return null
 }
 
-/** Find one, or make one. */
+/** Find one, or make one. Fine for a test that only reads. */
 export async function launchableSimulation(request) {
   return (await findLaunchable(request)) || provision(request)
+}
+
+/**
+ * A simulation this test alone owns.
+ *
+ * Reuse is wrong for any test asserting about a *state* — "this run has not
+ * started" is only true until some other test starts the very simulation it
+ * was handed. Sharing has now caused three separate false failures, each of
+ * which read as a product bug. A test that asserts about a resource must own
+ * that resource.
+ */
+export async function ownSimulation(request, options = {}) {
+  return provision(request, options)
 }
 
 /**

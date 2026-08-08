@@ -412,12 +412,21 @@ def test_generating_for_an_unknown_simulation_is_a_404(client):
 
 
 def test_A_RUNNING_SIMULATION_CANNOT_BE_REPORTED_ON(client):
-    """A report on a run in progress describes a moment, not the run."""
-    client.runtime.manager.running.add(client.sim_id)
-    response = client.post("/api/report/generate", json={"sim_id": client.sim_id})
+    """A report on a run in progress describes a moment, not the run.
 
-    assert response.status_code == 409
-    assert "still running" in response.get_json()["error"]
+    Marked started rather than added to the manager's running set: since the
+    interview window arrived, a live *process* no longer means a live *run* —
+    a finished simulation keeps its worker up so its agents can still be
+    interviewed. The state is the authority for this question.
+    """
+    client.runtime.sims.mark_started(client.sim_id)
+    try:
+        response = client.post("/api/report/generate", json={"sim_id": client.sim_id})
+
+        assert response.status_code == 409
+        assert "still running" in response.get_json()["error"]
+    finally:
+        client.runtime.sims.mark_finished(client.sim_id)
 
 
 def test_a_simulation_with_no_run_data_is_refused(client, tmp_path):
@@ -514,3 +523,42 @@ def test_exporting_an_unknown_report_is_a_404(client):
 def test_a_report_can_be_deleted_over_http(client, saved):
     assert client.delete(f"/api/report/{saved}").status_code == 200
     assert client.get(f"/api/report/{saved}").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# The interview window and reporting
+# --------------------------------------------------------------------------
+#
+# A finished run keeps its worker up for a while so its agents can still be
+# interviewed. That made `manager.is_running` true for a run that had ended,
+# and the report endpoint was asking exactly that — so it refused a report on a
+# run that finished minutes ago, which is the moment someone wants one.
+#
+# The question is whether the *run* is in progress, not whether a process
+# exists.
+
+
+def test_A_LINGERING_WORKER_DOES_NOT_BLOCK_A_REPORT(client, monkeypatch):
+    """The interview window must not make a finished run unreportable."""
+    sim_id = client.sim_id
+    # The worker is alive — as it is for the whole interview window — but the
+    # run itself is complete.
+    monkeypatch.setattr(client.runtime.manager, "is_running", lambda _sim: True)
+
+    response = client.post("/api/report/generate", json={"sim_id": sim_id})
+
+    assert response.status_code == 202, response.get_json()
+
+
+def test_a_genuinely_running_simulation_is_still_refused(client):
+    from app.services.simulation_store import SimulationState
+
+    client.runtime.sims.mark_started(client.sim_id)
+    try:
+        response = client.post("/api/report/generate", json={"sim_id": client.sim_id})
+        assert response.status_code == 409
+        assert "still running" in response.get_json()["error"]
+        assert client.runtime.sims.load_meta(client.sim_id).state == \
+            SimulationState.RUNNING
+    finally:
+        client.runtime.sims.mark_finished(client.sim_id)

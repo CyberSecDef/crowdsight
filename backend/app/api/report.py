@@ -20,7 +20,7 @@ from flask import Blueprint, Response, jsonify, request
 
 from app.services.report_store import ReportNotFound, ReportStore, render_html, render_markdown
 from app.services.runtime import get_runtime
-from app.services.simulation_store import SimulationNotFound
+from app.services.simulation_store import SimulationNotFound, SimulationState
 from app.services.tasks import TaskProgress, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,12 @@ def generate():
         return _error("sim_id is required", 400)
 
     meta = runtime.sims.load_meta(sim_id)
-    if runtime.manager.is_running(sim_id):
+    # The run's *state*, not whether a process is alive. Since the interview
+    # window was added, a finished run keeps its worker up for a while so its
+    # agents can still be asked questions — and `is_running` is true for the
+    # whole of that. Asking it here refused a report on a run that had finished
+    # minutes ago, which is exactly the moment someone wants one.
+    if meta.state == SimulationState.RUNNING:
         return _error(
             f"Simulation {sim_id} is still running; a report on a run in progress "
             f"would describe a moment rather than the run", 409)

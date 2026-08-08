@@ -33,6 +33,10 @@ function accept(result, file) {
   if (!result.ok) {
     rejected.value = result.reason
     chosen.value = null
+    // Tell the parent too. Clearing only our own copy left it holding the
+    // file accepted before this one, so the screen showed a refusal while
+    // Build was still armed with the previous document.
+    emit('selected', null)
     return
   }
   rejected.value = ''

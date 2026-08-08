@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test --grep-invert \"the whole pipeline\"",
+    "test:e2e:pipeline": "playwright test --grep \"the whole pipeline\""
   },
   "dependencies": {
     "cytoscape": "^3.34.0",
@@ -21,6 +22,8 @@
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.4.11",
+    "happy-dom": "^20.11.2",
     "vite": "^6.0.7",
     "vitest": "^4.1.10"
   }

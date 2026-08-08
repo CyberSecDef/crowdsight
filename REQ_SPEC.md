@@ -994,10 +994,24 @@ An interview needs the worker, and the worker exited the moment the run ended �
 
 **A note on the interview task's progress.** `interview_job` documents itself as "reporting as answers arrive", but it awaits `conduct` in a single thread call and reports only twice — at 5% and at 100%. Nothing is wrong with the behaviour; the docstring promises a granularity it does not deliver, and a UI built to stream partial answers from it would show nothing until the end.
 
-**Step 7: Frontend test units**
+**Step 7: Frontend test units** ✅
 **Tests:** component tests with Vitest for upload validation, config form validation, and polling state machines (idle → running → complete → error). One Playwright end-to-end test walking upload → graph → profiles → short run → report against a live sealed stack.
 
 **Correction, from Step 1:** the polling state machine has **four** end states, not three. `awaiting_review` is a real backend status — ontology review, scenario review and prepare all park a task and wait for a person — confirmed live, sitting at progress 0.5 indefinitely. Vitest and Playwright were installed during Step 1's follow-up review, and the polling machine already has 17 cases and the shell 10 browser tests; this step extends them rather than starting from nothing.
+
+**Auditing against the exact wording found two real gaps.** All 197 existing Vitest tests were *module* tests — plain functions, no DOM — and the spec asks for **component** tests. `@vue/test-utils` was not installed and no component had ever been mounted. And there was no single end-to-end walk: the specs covered stages, nothing joined them up. Both are now closed: **50 component tests** across five components and **one pipeline walk**, bringing the frontend to **247 unit and component tests** and **81 browser tests**.
+
+**Mounting the components immediately found a bug no module test could.** `DropZone` cleared its own state when a file was refused but never told the parent — so choosing a good file and then a bad one left the parent holding the first while the screen showed a refusal, with Build still armed. `validateFile` was correct throughout; the component simply did not pass the verdict on.
+
+**And it corrected one of my own assertions.** The first version of that test asserted "a refused file emits no event at all", which is testing the mechanism rather than the property. Emitting `null` is how the parent is told to let go — forbidding it would forbid the fix. The assertion is now that the parent never *holds* a rejected file.
+
+**Component coverage went past the two the spec names.** `DropZone` and `ConfigEditor` as written, plus `OntologyEditor`, `ProfileCard` and `CitationLink` — each of those renders a *refusal* the server would otherwise enforce silently: a locked provenance field, a name that normalises to something else, a citation that resolves to nothing. A template change could drop any of them and every module test would still pass, because the rule would still be computed correctly and simply never shown.
+
+**The pipeline walk found a regression I had introduced and wrongly declared safe.** The interview window from Step 6's follow-up keeps a finished run's worker alive, which makes `manager.is_running()` true for the whole window. `POST /api/report/generate` was asking exactly that to refuse a report on a run in progress — so a run that had finished two minutes ago could not be reported on, which is precisely when someone wants a report. I had written in the spec that "a report can be generated while the window is open"; **that claim was never verified and was wrong**. The check now asks the run's *state*, and the pre-existing test that guarded it has been changed from stubbing process liveness to marking the run started, because a live process no longer means a live run.
+
+**The walk lives behind `npm run test:e2e:pipeline`,** so `npm run test:e2e` stays the fast loop. It is the frontend twin of the release gate Phase 10 Step 1 asks for in Python. It runs in under two minutes.
+
+**A third fixture-sharing failure, and the rule that follows from it.** The draft-run interview test reused a shared simulation, which another test in the same file then started — so "this run has not started" became false through no fault of the code under test. **A test that asserts about a resource's state must own that resource**; `ownSimulation` now exists alongside the sharing helpers for exactly that.
 
 ---
 

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-import { launchableSimulation, longRunningSimulation } from './support.js'
+import { longRunningSimulation, ownSimulation } from './support.js'
 
 /**
  * Stage 5 — interviews.
@@ -86,8 +86,10 @@ test.describe('a draft run', () => {
     request,
   }) => {
     test.setTimeout(10 * 60 * 1000)
-    const simId = await launchableSimulation(request)
-    test.skip(!simId, 'no draft simulation')
+    // Its own: another test starting a shared draft would make this assertion
+    // false through no fault of the code it is testing.
+    const simId = await ownSimulation(request)
+    test.skip(!simId, 'could not provision a simulation')
 
     await page.goto(`/simulations/${simId}/interview`)
     await expect(page.getByText(/has not started, so there is nobody to ask yet/))
