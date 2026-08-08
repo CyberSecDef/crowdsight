@@ -44,8 +44,8 @@ section below.
 | [7](#phase-7) | Monitoring, data access, and agent interviews | 5 | **5 / 5** — 4 ✅, 1 ⚠️ |
 | [8](#phase-8) | Report generation | 4 | **4 / 4** — 2 ✅, 2 ⚠️ |
 | [9](#phase-9) | Frontend | 7 | **7 / 7** — 6 ✅, 1 ⚠️ |
-| [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **48 / 53** |
+| [10](#phase-10) | Integration testing, egress verification, and operations | 5 | **5 / 5** — 5 ✅ |
+| | **Total** | **53** | **53 / 53** — 44 ✅, 9 ⚠️ |
 
 ---
 
@@ -2074,70 +2074,259 @@ check can report PASS after crashing, matters more than it first looks.
 
 > Specification: [line 1020](REQ_SPEC.md#L1020)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `tests/test_e2e_pipeline.py` — a fixture document runs the complete pipeline end to end
+(upload → graph → profiles → config → 3-agent/2-round simulation → report) against real local
+services. Marked `integration`, run before every release.
 
-**Satisfied by:** _pending_
+**Satisfied by:** The file exists, is `integration`-marked (so it is one of the 63 the default suite deselects), and
+**passed in 80.85 s** against the live stack for this document — comfortably inside the 88 s the
+specification records.
 
-**Where:** _pending_
+It is driven over HTTP exactly as the UI drives it, and it asserts the **handovers** rather than
+the stages:
 
-**Verified by:** _pending_
+* every named agent's `source_entity_uuid` is in the set of entities *this document* produced —
+  `assert sources <= graph_entity_uuids` — and a synthetic agent carries none;
+* every actor in the run is a member of *that* population — `assert actors <= population_ids`;
+* every post surviving in the report is a post from *that* run — `assert cited <= post_ids` —
+  and the citations are then fetched back through the `post_ids` filter the UI's citation links
+  use, asserting the count matches, so a citation the report offers can actually be opened.
+
+It also pins the parked-review contract (`status == "awaiting_review"` at `progress == 0.5`), that
+the scenario belongs to the graph (`config["graph_id"] == graph_id`), that the action space is
+non-empty, and that both exports render.
+
+**The corrected assertion is in the file, with its reasoning.** Rather than requiring
+`grounding["unresolved"]` to be empty — which asserts the model's luck — it asserts the system's
+guarantee: `if grounding["unresolved"]: assert grounding["dropped"]`, so anything the check caught
+must have cost a claim.
+
+It is kept alongside `test_simulation_smoke.py` rather than replacing it: the smoke test starts
+from a fake graph id and is the faster gate, and the two fail for different reasons. The `database
+is locked` flake that prompted the WAL change is resolved — the run database reports
+`journal_mode: wal`, verified in Phase 6.
+
+**Where:** `backend/tests/test_e2e_pipeline.py`; the WAL switch in `backend/app/services/simulation_persistence.py:130-155`
+
+**Verified by:** Run for this document: **1 passed in 80.85 s** with `-m integration` against live Neo4j, Ollama and a real spawned worker.
 
 ### 10.2 — Egress verification suite
 
 > Specification: [line 1037](REQ_SPEC.md#L1037)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `tests/test_egress_verification.py` — the compliance gate. Include the frontend container, which
+`test_network_isolation.py` does not cover. Assert the backend container has no route off-host;
+assert config validation rejects external URLs; assert no source file contains a non-allowlisted
+URL literal; optionally capture traffic. Treat a failure as a release blocker, not a warning.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **24 checks, all passing from the host.** In-container 9 run and 15 skip — and the skips name
+where to run them (*"reads the source tree, which this container does not hold; run from the host
+with `pytest backend/tests/test_egress_verification.py`"*), because the backend image carries
+`backend/` only and an in-container run would audit half the tree while looking green.
+`test_network_isolation.py` adds 11 from the host. `pytestmark = pytest.mark.egress` rather than
+`integration`, so the default suite cannot skip the gate.
 
-**Where:** _pending_
+**The Phase 9 gap is closed.** The four frontend-container properties `verify_frontend.sh` was
+carrying alone are now in the gate:
+`test_THE_FRONTEND_IS_ON_THE_SEALED_NETWORK_AND_NOT_THE_EDGE`,
+`test_the_frontend_publishes_no_ports`, `test_the_frontend_has_no_default_route`,
+`test_THE_FRONTEND_CANNOT_REACH_THE_REGISTRY_IT_WAS_BUILT_FROM`, plus
+`test_the_shipped_bundle_names_no_external_host`.
 
-**Verified by:** _pending_
+**The source audit has teeth, proved by planting hosts rather than by reading it.** Appending
+`TELEMETRY = "https://telemetry.example.com/collect"` to `backend/app/services/report_store.py`
+failed `test_NO_RUNTIME_SOURCE_FILE_NAMES_AN_EXTERNAL_HOST` naming the file and the host;
+appending `TRACKER = "https://analytics.example.com/x"` to `frontend/src/api/client.js` failed it
+again, which proves the audit reaches **both** trees rather than only the Python one. Both
+plants were reverted and the tree is clean.
+
+**The lockfile check is a real supply-chain check.** All **181** packages in
+`frontend/package-lock.json` that carry a `resolved` URL resolve from `registry.npmjs.org` and
+nothing else — the `funding` and `repository` links to github, opencollective and tidelift are
+metadata and correctly outside the check. `test_the_lockfile_actually_pins_something` guards
+against an empty lockfile satisfying the first check vacuously, which is the same class of failure
+found elsewhere in this document.
+
+**Both of the specification's self-corrections are in the code, with their reasons.** The refusal
+tests take a `base_env` fixture supplying `NEO4J_PASSWORD` and assert
+`"outside the sealed perimeter" in str(raised.value)` — so they cannot pass by raising over
+something else. And a comment marks `203.0.113.0/24` as deliberately absent, because RFC 5737
+documentation space is reported *private* by `ipaddress.is_private`. The accepted-endpoint and
+private-LAN cases run alongside, so the refusal is demonstrably about being external rather than
+about being strict; the LAN case emits a real `PerimeterWarning` naming the address.
+
+Traffic capture is deliberately not built, and the reason is recorded rather than left as a
+silent gap: it would need `NET_RAW` inside the container the project exists to confine.
+
+**Where:** `backend/tests/test_egress_verification.py` — `ALLOWED_RUNTIME_HOSTS` (41), `_require_repo` (75), `_hosts_in` (82), the source audit (104-151), the lockfile checks (154-190), the perimeter refusals (198-262), the frontend checks (292-340); `backend/tests/test_network_isolation.py`
+
+**Verified by:** Run from the host for this document: `test_egress_verification.py` **24 passed**, `test_network_isolation.py` **11 passed**. In-container: 9 passed, 15 skipped with the reason. Two planted hosts each turned the audit red.
 
 ### 10.3 — Performance baseline
 
 > Specification: [line 1056](REQ_SPEC.md#L1056)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Record wall-clock timings for a standard workload (50 agents, 10 rounds) on the target hardware.
+Store as a baseline so regressions are visible. Document expected duration prominently — users
+must know a real run takes hours, not minutes.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `docs/performance-baseline.json` holds the measurement, not an extrapolation, and names the run it
+came from (`sim-20260808-115939-aa2d35` — the same 50-agent run this document has been probing
+throughout, so the figures are cross-checkable against the database):
 
-**Where:** _pending_
+    prepare 260.1 s (4.3 min) · run 1163.4 s (19.4 min) · report 175.1 s (2.9 min)
+    total 1598.6 s = 26.6 min · 485 actions recorded
 
-**Verified by:** _pending_
+485 is exactly the non-engine action count Phase 7's endpoint reports for that run.
+
+**The slowdown across a run is recorded per round**, which is the most useful thing in the file:
+`[72, 70, 81, 129, 115, 119, 132, 153, 133, 145]` — round 1 at 72 s and round 10 at 145 s, a
+factor of two, because agent memory and the feed both grow. Estimating a long run from its first
+rounds underestimates it by about half.
+
+The hardware and the concurrency budget it was measured under are stored with it — RTX 5070 Ti
+Laptop 12 GB, Ryzen 9 8940HX, 61 GB RAM, and the full budget block
+(`llm_concurrency 4, api_reserve 1, max_concurrent_simulations 2, per_worker 1`).
+
+**`scripts/benchmark.py` reproduces it and reports drift rather than passing or failing**, and its
+own docstring says why: the same three-agent population has taken 4 to 32 seconds a round on this
+machine depending on what else was running, so a threshold loose enough not to cry wolf would not
+catch a real regression. `--save` adopts a new baseline; `--agents/--rounds` scale the workload.
+
+**The duration is documented prominently and matches the baseline exactly.** The README's
+"How long a run takes" section leads with *"Hours, not minutes"* and carries the same table
+(4.3 / 19.4 / 2.9 / **26.6 min**), the same 72 s → 145 s observation, the same 83% mean and 97%
+median GPU utilisation, and the extrapolation to **2.5–3 hours** for 300 agents — an overnight job
+rather than a coffee break — with the advice to start at 20 agents and 3 rounds.
+
+**Where:** `docs/performance-baseline.json`, `scripts/benchmark.py`, `README.md` (the *How long a run takes* section, lines 124-150)
+
+**Verified by:** The stored baseline read for this document and cross-checked against the run's own database (485 actions) and against the README's table field by field. `benchmark.py --help` runs.
 
 ### 10.4 — Operational tooling
 
 > Specification: [line 1071](REQ_SPEC.md#L1071)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** A health endpoint reporting Ollama reachability, Neo4j connectivity, model availability and disk
+headroom. Structured JSON logging. A backup script for the Neo4j store and `data/`. A cleanup
+command for old simulation databases.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All four exist and were exercised live.
 
-**Where:** _pending_
+**`GET /api/health` answers all four questions separately**, and answered them for this document:
+`neo4j` reachable, `ollama` reachable, `models` with `present: ["nomic-embed-text:latest",
+"qwen2.5:14b"]` and `missing: []`, and `disk` with `free_gb: 1462.4`, `percent_used: 17.0`,
+`low: false`. It also reports `config: "valid"` and an empty `perimeter_warnings`. The model check
+is the one that answers a different question from reachability — a sealed stack **cannot pull** a
+model it is missing — and a missing one yields `degraded` rather than `ok`. Tag matching is
+deliberate and tested (`test_a_tagged_model_matches_an_untagged_config`), so
+`nomic-embed-text:latest` against a config naming `nomic-embed-text` is not a false alarm.
 
-**Verified by:** _pending_
+**Logging is text by default and JSON on request**, both confirmed by running them.
+`CROWDSIGHT_LOG_FORMAT=json` produced
+`{"time": ..., "level": "INFO", "logger": "probe", "message": "round finished", "sim_id":
+"sim-x", "round": 3}` — `sim_id` and `round` as real fields, not a prefix to be parsed back out.
+And the safety property holds: passing an unserialisable object in `extra` logged
+`"thing": "<object object at 0x...>"` rather than raising, so a log line cannot kill the run that
+was only trying to report progress.
+
+**`scripts/backup.sh` carries the guards the specification describes** (checked without running
+it, since it stops the database and writes a ~2 GB dump): it refuses to start while a simulation
+is running — *"a database copied mid-round backs up a half-written round"* — stops Neo4j for a
+consistent dump because Community edition has no online backup, restores it from a
+`trap restore_neo4j EXIT` so the database comes back on success, failure or Ctrl-C, and writes a
+`RESTORE.md` alongside the artefacts. It passes `bash -n`.
+
+**`scripts/cleanup.py` will not delete a run something has been published about**, and this was
+verified rather than read. It is a dry run by default and prints why each survivor stayed:
+**9 runs kept as "a report cites it"** — exactly the 9 reports on disk — with the rest kept as
+"state is draft". The report set is read from `data/reports/` rather than from the API, so the
+protection survives the stack being down: with the API pointed at a dead port and the default
+30-day window, the survey returned **0 removable and 61 kept** — 9 by the report check and 52 as
+*"recently modified, and its state is unknown"*. Failing safe is the correct behaviour for the
+moment someone is most likely to be tidying up.
+
+**Where:** `backend/app/main.py` — `_models_present`, `_disk`, `MIN_FREE_GB`, the health route (~200-240); `backend/app/logging_setup.py` — `JsonFormatter`, `configure`, `json_logging_requested`; `scripts/backup.sh`; `scripts/cleanup.py` — `reported_simulations` (50), `survey` (83)
+
+**Verified by:** `tests/test_operational_tooling.py` — **17 tests**, covering the disk threshold, a model that was never pulled, tag matching, an unreachable Ollama, all four health fields, text-by-default, JSON opt-in, `sim_id` as a queryable field, and `test_A_LOG_LINE_CANNOT_KILL_A_RUN`. Health, both log formats and `cleanup.py` exercised live for this document.
 
 ### 10.5 — Documentation
 
 > Specification: [line 1084](REQ_SPEC.md#L1084)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `README.md` (quick start), `docs/ARCHITECTURE.md` (component diagram and data flow),
+`docs/PROVISIONING.md` (the one-time internet-connected model pull, and how to re-seal
+afterwards), `docs/PRIVACY.md` (the allowlist, how sealing is enforced, how to verify it
+independently).
 
-**Satisfied by:** _pending_
+**Satisfied by:** All four exist. The README is 613 lines and each document is the authority on its subject, with
+the README keeping a summary and a link rather than restating the depth.
 
-**Where:** _pending_
+**Every internal link resolves.** Checked across all 9 Markdown files in the tree: **86 internal
+links, none broken**.
 
-**Verified by:** _pending_
+`PRIVACY.md` is written to be distrusted, and the checks it offers are the ones that were run for
+this document: `docker network inspect`, the missing default route, `python -m app.egress_check`,
+a by-hand connection attempt, and the two `egress`-marked files that make up the gate — which pass
+at 24 and 11 from the host. It states the residual DNS channel on the non-internal `edge` network
+rather than hiding it, and says why traffic capture is deliberately absent.
+
+`PROVISIONING.md` leads with the two lazily-fetched assets, and both are verifiably baked:
+`/opt/tiktoken` holds four BPE encodings and `/opt/huggingface` holds
+`models--Twitter--twhin-bert-base` at 1.1 GB, with `HF_HUB_OFFLINE=1` set. Its warning that a
+missing recommender model is *"a silently worse simulation rather than an error"* is the failure
+mode the bake exists to prevent.
+
+`ARCHITECTURE.md` documents decisions rather than boxes, and every one this document checked
+independently holds: the worker builds its own `Config` from the environment; the budget formula
+`(LLM_CONCURRENCY - API_LLM_RESERVE) // MAX_CONCURRENT_SIMULATIONS` produces exactly the
+`per_worker: 1` that `GET /api/simulation/budget` returns; round boundaries are rowid high-water
+marks; `state` and `interviewable` are different questions and the API reports both.
+
+**One number in the specification's own Completion table has drifted**, recorded here because this
+document is where the current figures live. It says backend unit 1,514; the suite now collects
+**1,596 in total — 1,532 in the default run, 63 `integration` and 1 `stress`**. The frontend
+figures (247 unit and component, 80 browser plus the pipeline walk, 38 gateway and bundle checks)
+and the egress figures (24 host, 17 in-container) all still match.
+
+**Where:** `README.md`, `docs/ARCHITECTURE.md`, `docs/PRIVACY.md`, `docs/PROVISIONING.md`, `docs/performance-baseline.json`
+
+**Verified by:** 86 internal links across 9 Markdown files, 0 broken. The README's timing table checked field by field against `performance-baseline.json`. The provisioning claims checked against the running container (`/opt/tiktoken`, `/opt/huggingface`, `HF_HUB_OFFLINE`). The architecture claims checked against `GET /api/simulation/budget` and the run database.
+
+---
+
+## Open items
+
+All 53 steps are satisfied. Nine carry a deviation or limitation, gathered here so a reader does
+not have to find them. Nothing in this list was fixed — this document reports, it does not change
+code — and none of it blocks a run.
+
+| Step | What | Why it matters |
+|---|---|---|
+| [1.2](#12--the-configuration-module) | Two shipped defaults differ from the specification's stated values | Deliberate, recorded at the time; the perimeter behaviour is unchanged |
+| [3.1](#31--file-parsing) | Encoding detection mis-decodes one of the tested inputs | Accepted in the specification itself; the gate behaves as designed |
+| [3.3](#33--ontology-generation) | The document sample elides at small budgets | Marked with `[...]`, so the model is not misled about completeness |
+| [5.3](#53--config-persistence-and-override) | A rebuilt `meta.json` resets `state` to `draft` | A running run whose metadata is lost becomes editable — the freeze fails open, not closed |
+| [6.6](#66--engine-test-units) | Comment round-attribution has no test and no live evidence | `comments_by_round` works when probed, but every run so far has been Twitter |
+| [7.2](#72--content-access-endpoints) | `platform` validates instead of filtering | Deliberate: a run has one platform, so filtering would be a lie |
+| [8.1](#81--report-agent) | Computed caveats are a floor, not a correction | A model caveat misstating a large run's scale stands unchallenged |
+| [8.3](#83--report-api-and-persistence) | `Content-Type` carries a duplicated `charset` | Cosmetic; `mimetype=` was given a value that wanted `content_type=` |
+| [9.1](#91--application-shell) | The UI contract check can pass after crashing, and the per-content-type CSP is flattened by the gateway | The first is a green check that verified two of six shapes; the second is a tightening that never reaches a browser |
+
+Two of these are worth reading together. **6.6 and 8.1 are both cases of a guarantee that holds
+where it was tested and has no evidence where it was not** — a capability with no live run behind
+it, and a floor that only fires on the runs it was written for. **9.1's first finding is the
+sharpest**, because a check that reports PASS after crashing is worse than no check: it reads as
+coverage.
 
 ---
