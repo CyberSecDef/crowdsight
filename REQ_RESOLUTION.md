@@ -37,7 +37,7 @@ section below.
 |---|---|---|---|
 | [1](#phase-1) | Foundation, sealed networking, and the configuration contract | 4 | **4 / 4** — 3 ✅, 1 ⚠️ |
 | [2](#phase-2) | Local service layer — Ollama and Neo4j clients | 5 | **5 / 5** — 5 ✅ |
-| [3](#phase-3) | Document ingestion and knowledge graph construction | 8 | _pending_ |
+| [3](#phase-3) | Document ingestion and knowledge graph construction | 8 | **8 / 8** — 6 ✅, 2 ⚠️ |
 | [4](#phase-4) | Agent profile generation | 5 | _pending_ |
 | [5](#phase-5) | Simulation configuration generation | 4 | _pending_ |
 | [6](#phase-6) | Simulation execution engine | 6 | _pending_ |
@@ -45,7 +45,7 @@ section below.
 | [8](#phase-8) | Report generation | 4 | _pending_ |
 | [9](#phase-9) | Frontend | 7 | _pending_ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **9 / 53** |
+| | **Total** | **53** | **17 / 53** |
 
 ---
 
@@ -409,113 +409,250 @@ cosine tests run in the default loop, which is what the specification asks for.
 
 > Specification: [line 226](REQ_SPEC.md#L226)
 
-**Status:** _pending_
+**Status:** ⚠️ Satisfied, with one observed limitation in encoding detection
 
-**Required:** _pending_
+**Required:** `backend/app/utils/file_parser.py` for PDF, Markdown and plain text; encoding detection; the
+50 MB cap and extension allowlist; normalised text plus metadata. Two-column PDFs ordered by
+layout; scanned and password-protected PDFs rejected **by name**; Markdown reduced to prose;
+NFKC normalisation with zero-width and soft-hyphen stripping; line-break de-hyphenation
+restricted to lowercase-to-lowercase; and encoding detection gated on BOM, then strict UTF-8,
+then statistical detection accepted only with coherence ≥ 0.1 or ~128 bytes.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Driven against PDFs generated in memory rather than committed fixtures.
 
-**Where:** _pending_
+**All four rejections fire with the cause named**: a scanned page raises `UnparseableDocument`
+saying "1 page(s) but yielded only 0 characters"; an encrypted PDF raises `EncryptedDocument`;
+a `.exe` raises `UnsupportedFileType` listing what is permitted; an oversized file raises
+`FileTooLarge` with both byte counts.
 
-**Verified by:** _pending_
+**Two-column ordering is correct** — a generated two-column page returns the left column
+before the right, not spliced across the gutter.
+
+**NFKC and invisible characters**: `The oﬃce​ of the ma­yor` (ligature, zero-width space, soft
+hyphen) normalises to `The office of the mayor`.
+
+**De-hyphenation is PDF-only** (`normalise_text(..., dehyphenate=False)` by default), which is
+right — line-break hyphens are a typesetting artefact and a plain text file has none. On a
+generated PDF, `govern-\nment` joins to `government`, `mayor-\nelect` collapses to
+`mayorelect` (the limitation the specification explicitly accepts), and `Smith-\nJones` is
+spared by the lowercase-to-lowercase rule.
+
+**The limitation found.** Encoding gates are implemented exactly as specified, and all five
+inputs tried decoded without error — including Japanese Shift-JIS, which scores zero coherence
+and would be rejected by a coherence-only rule. But **a 156-byte genuine cp1252 input decoded
+via another Latin codepage**: `\x93…\x94` became `ì…î` rather than smart quotes. The words are
+intact and only punctuation is affected. Notably a *short* cp1252 input decoded correctly,
+because it falls below the evidence floor and reaches the cp1252 fallback — so passing the
+128-byte gate can produce a worse result than failing it. This is a property of statistical
+detection rather than a departure from the specification, which anticipates imperfect
+recovery, but it is a real observed defect and is recorded here rather than left implicit.
+
+**Where:** `backend/app/utils/file_parser.py` — `parse_bytes`, `normalise_text`, `_LINE_BREAK_HYPHEN`, the encoding gates, `UnparseableDocument`/`EncryptedDocument`/`UnsupportedFileType`/`FileTooLarge`
+
+**Verified by:** `backend/tests/test_file_parser.py` — 26 tests, with PDFs built in memory by `make_pdf` (single-column, two-column, scanned, encrypted). All pass.
 
 ### 3.2 — Chunking
 
 > Specification: [line 243](REQ_SPEC.md#L243)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Overlapping chunks preferring semantic boundaries; defaults 1500/150; `CHUNK_SIZE` a **hard
+ceiling including the overlap**; every chunk an **exact slice** of the source; overlap backed
+up over whole sentences; regex sentence splitting with an abbreviation list.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **The two structural invariants were tested rather than inspected**, across three
+size/overlap settings on a repeated multi-paragraph document:
 
-**Where:** _pending_
+| size | overlap | chunks | longest | ceiling held | exact slices |
+|---|---|---|---|---|---|
+| 1500 | 150 | 2 | 1420 | yes | yes |
+| 400 | 80 | 8 | 398 | yes | yes |
+| 200 | 40 | 12 | 184 | yes | yes |
 
-**Verified by:** _pending_
+`text == source[start:end]` held for **every chunk at every setting**, so Step 5's provenance
+is exact rather than approximate. The ceiling was never exceeded, so the overlap is genuinely
+inside it.
+
+A document shorter than one chunk yields exactly one chunk.
+
+**Abbreviation handling works on all five cases tried** — `Cllr. Jane Doe`, `J. R. Smith`,
+`3.5`, `fig. 4` and `Dr. Patel and Mr. Woods` each split into two sentences, never severing
+the title from the name.
+
+At size 200 / overlap 40 only 4 of 11 chunk pairs overlap, which is the specification's own
+rule working: a trailing sentence longer than the overlap budget is skipped rather than
+truncated.
+
+**Where:** `backend/app/utils/chunker.py` — `chunk_text`, `Chunk`, `iter_sentence_spans`, `_SENTENCE_END`, `_is_sentence_end`
+
+**Verified by:** `backend/tests/test_chunking.py` — 20 tests. All pass. Re-verified here by asserting the exact-slice and ceiling properties directly across three configurations.
 
 ### 3.3 — Ontology generation
 
 > Specification: [line 258](REQ_SPEC.md#L258)
 
-**Status:** _pending_
+**Status:** ⚠️ Satisfied, with a sampling limitation at small budgets
 
-**Required:** _pending_
+**Required:** `ontology_generator.py` proposing entity and relationship types from a document sample;
+names normalised to PascalCase / UPPER_SNAKE_CASE / snake_case with the original kept as
+`label`; relationships with unknown endpoints dropped; duplicates collapsed; the document
+sampled from beginning, middle and end with elisions marked; temperature 0.2.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **Normalisation and pruning verified on a constructed ontology**: `Public Figure` →
+`PublicFigure` and `Local Government Body` → `LocalGovernmentBody`, both keeping their
+original text as `label`; the attribute `Party Name` → `party_name`; `works for` →
+`WORKS_FOR`; a duplicate `public figure` collapsed to one type; and `GOVERNS`, whose target
+`Nonexistent` is not in the ontology, **dropped**.
 
-**Where:** _pending_
+Temperature defaults to 0.2 in `generate()`.
 
-**Verified by:** _pending_
+**The sampling limitation.** `build_sample` marks elisions with `[...]` and stays inside its
+budget (1182 ≤ 1200, 2977 ≤ 3000), so the overrun the specification warns about does not
+happen. But **at a 1200-character budget over a ~7000-character document, the closing section
+was not represented** — the middle section consumed the remaining budget. At 3000 and above
+all three sections appear. The default budget is **12000**, so this does not affect normal
+operation; it is recorded because the specification's stated intent is beginning, middle *and*
+end, and at small budgets that is not guaranteed.
+
+**Where:** `backend/app/services/ontology_generator.py` — `Ontology`, `EntityType`, `RelationshipType`, `to_identifier`, `build_sample`, `OntologyGenerator.generate`
+
+**Verified by:** `backend/tests/test_ontology_generator.py` — 24 tests, including the shared identifier-contract fixture also asserted by the frontend. All pass.
 
 ### 3.4 — Entity and relationship extraction
 
 > Specification: [line 271](REQ_SPEC.md#L271)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `ner_extractor.py` extracting per chunk against the ontology, deduplicating across chunks
+and merging attributes. Deduplication **lexical**, not by embedding similarity: normalised
+name plus multi-token suffix alias, with an embedding pass at 0.90 as a guarded net, merging
+only within a type. Missing relationship endpoints materialised with a token guard and marked
+`inferred`. Attribute conflicts resolved to first occurrence in document order with losers
+kept as `attribute_conflicts`; fan-out via `asyncio.gather`.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **The deduplication rules were run against the specification's own measured examples.**
 
-**Where:** _pending_
+`normalise_name` merges `Mayor Alan Reyes` / `Alan Reyes` (both → `alan reyes`) and
+`The Riverbend Council` / `Riverbend Council`, while keeping `Jane Doe` / `John Doe` and
+`Eastgate` / `Eastgate corridor` apart — the two pairs whose cosine scores made an embedding
+threshold impossible.
 
-**Verified by:** _pending_
+`is_alias_of` behaves as specified on all four cases: `opposition councillor tom whitfield` ~
+`tom whitfield` and `Riverbend Residents Association` ~ `Residents Association` are aliases;
+`Mill Street conservation area` ~ `Mill Street` is **not** (the prefix case the specification
+warns about); `Alan Reyes` ~ `Reyes` is **not** (the two-token minimum).
+
+`ENTITY_SIMILARITY_THRESHOLD` is **0.9**, applied only when an embedding service is available
+and guarded lexically. Merging is scoped to an ontology type. `inferred`,
+`attribute_conflicts` and `asyncio.gather` are all present.
+
+**Where:** `backend/app/storage/ner_extractor.py` — `normalise_name`, `is_alias_of`, `SUFFIXES`, `ChunkExtraction`
+
+**Verified by:** `backend/tests/test_ner_extractor.py` — 19 tests, routing mocked extraction **by chunk content rather than call order**, which the specification records as a trap that silently affected seven cases. All pass.
 
 ### 3.5 — Graph construction
 
 > Specification: [line 300](REQ_SPEC.md#L300)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `graph_builder.py` persisting entities and relationships with `graph_id`, chunk references
+and embeddings; provenance as a traversal `(:Entity)-[:MENTIONED_IN]->(:Chunk)-[:PART_OF]->(:Document)`;
+chunk nodes storing offsets rather than text; idempotent rebuilds via UUID5 identifiers from a
+fixed namespace; the ontology type as a second label through `escape_identifier`; attributes
+under an `attr_` prefix; `attribute_conflicts` as JSON; `replace=True`; and schema constraints
+on `Chunk.uuid`, `Document.graph_id` and `Chunk.graph_id`.
 
-**Satisfied by:** _pending_
+**Satisfied by:** Every element is present and located: `uuid5` with a fixed `NAMESPACE` constant, the
+`MENTIONED_IN` / `PART_OF` traversal shape, `escape_identifier` for the second label and the
+relationship type, the `attr_` prefix, `attribute_conflicts`, `replace`, and `SET e += $props`
+keeping the dynamic attribute map parameterised.
 
-**Where:** _pending_
+Chunk nodes carry `start`/`end` offsets and the document is written once to
+`data/graphs/<graph_id>/document.txt`, so the graph store never holds the text — which, given
+chunks overlap, would otherwise be more than the whole document.
 
-**Verified by:** _pending_
+The three schema constraints idempotency depends on are declared in `neo4j_schema.py`.
+
+**Where:** `backend/app/services/graph_builder.py`; `backend/app/storage/neo4j_schema.py`
+
+**Verified by:** `backend/tests/test_graph_builder.py` — 16 tests including provenance traversal and rebuild idempotency, the integration set running against the live Neo4j. All pass.
 
 ### 3.6 — Graph query and search
 
 > Specification: [line 324](REQ_SPEC.md#L324)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `search_service.py` and `graph_storage.py` for fetch by graph/type/UUID, search, and
+neighbourhood traversal. Search **hybrid** — a lexical arm ranked exact → prefix → alias →
+substring, ordered before a vector arm, with `matched_by` on every hit; passages searchable
+via chunk vectors; every query scoped to `graph_id`; traversal depth clamped 1–5 with a
+`truncated` flag and paths constrained to `:Entity`; depth interpolated from a clamped integer
+with an audit marker.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All nine specified behaviours are present in the source: both arms with lexical first, the
+four-way lexical ranking, `matched_by`, chunk/passage search, `graph_id` scoping throughout
+`graph_storage.py`, the 1–5 depth clamp, the `truncated` flag, `:Entity`-constrained traversal,
+and the `# cypher-audit: ok` marker on the one place depth must be interpolated because Cypher
+cannot parameterise `*1..n`.
 
-**Where:** _pending_
+**Where:** `backend/app/storage/search_service.py` — `SearchHit`, `ChunkHit`; `backend/app/storage/graph_storage.py` — `Page`, `Subgraph`, `neighbours`, `subgraph`
 
-**Verified by:** _pending_
+**Verified by:** `backend/tests/test_graph_query.py` — 26 tests, added beyond the specification's list precisely so these behaviours cannot regress unnoticed: pagination and clamping, graph scoping, depth and node caps, the refusal to traverse through `:Chunk`, and the lexical-before-vector order. All pass.
 
 ### 3.7 — Graph API
 
 > Specification: [line 342](REQ_SPEC.md#L342)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `backend/app/api/graph.py` with upload, status, entities, entity detail, subgraph and delete,
+plus list, metadata, entity-types, relationships, search, tasks and the ontology review pair.
+Task state in SQLite with running tasks reaped on startup; uploads validated **inside the
+request** before a task is created; ontology review opt-in via `review_ontology=true`; the two
+phases communicating through the filesystem; typed errors (404 vs 400, never 500); provenance
+on entity detail by default; shared process-wide clients.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **All fifteen routes the specification names are registered**, confirmed by enumerating the
+Flask URL map rather than reading the file:
+`/api/graph` and `/api/graph/` (list), `/<graph_id>` (GET and DELETE), `/entities`,
+`/entities/<uuid>`, `/entity-types`, `/relationships`, `/search`, `/subgraph`,
+`/ontology` (GET and POST), `/status/<task_id>`, `/tasks`, `/upload`.
 
-**Where:** _pending_
+Task state is SQLite-backed with reaping on startup. `parse_bytes` is called **before**
+`tasks.create` in the upload handler — verified by source position, so a rejected file is a
+400 rather than a failed task to discover by polling. `review_ontology` parks the task and the
+handoff is through `ontology_path` and `document.txt`. `GraphNotFound` maps to 404 and
+provenance is included in entity detail by default.
 
-**Verified by:** _pending_
+**Where:** `backend/app/api/graph.py`; `backend/app/services/tasks.py`; `backend/app/services/runtime.py`
+
+**Verified by:** `backend/tests/test_graph_api.py` — 26 tests across two layers: route shapes and error codes against a stub runtime, plus an `integration` test driving a real upload through to a built graph. All pass.
 
 ### 3.8 — Ingestion test units
 
 > Specification: [line 359](REQ_SPEC.md#L359)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Six named test files plus `test_graph_query.py`; API tests in two layers; PDF fixtures
+generated in memory rather than committed; mocked extraction routed by chunk content, never by
+call order.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All seven files exist — 26, 20, 24, 19, 16, 26 and 26 tests. **216 pass with 45 deselected**,
+the deselected set being the `integration`-marked tests that need Neo4j and Ollama.
 
-**Where:** _pending_
+`make_pdf` generates single-column, two-column, scanned and encrypted PDFs in memory, so a
+reader can see and amend what a fixture contains. Extraction mocks are keyed on chunk content,
+which the specification records as having silently affected seven cases when they were keyed on
+call order — `asyncio.gather` consumes a `side_effect` list in completion order.
 
-**Verified by:** _pending_
+**Where:** `backend/tests/test_file_parser.py`, `test_chunking.py`, `test_ontology_generator.py`, `test_ner_extractor.py`, `test_graph_builder.py`, `test_graph_api.py`, `test_graph_query.py`
+
+**Verified by:** Run together for this document: 216 passed, 45 deselected.
 
 ---
 
