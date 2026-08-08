@@ -38,14 +38,14 @@ section below.
 | [1](#phase-1) | Foundation, sealed networking, and the configuration contract | 4 | **4 / 4** — 3 ✅, 1 ⚠️ |
 | [2](#phase-2) | Local service layer — Ollama and Neo4j clients | 5 | **5 / 5** — 5 ✅ |
 | [3](#phase-3) | Document ingestion and knowledge graph construction | 8 | **8 / 8** — 6 ✅, 2 ⚠️ |
-| [4](#phase-4) | Agent profile generation | 5 | _pending_ |
+| [4](#phase-4) | Agent profile generation | 5 | **5 / 5** — 5 ✅ |
 | [5](#phase-5) | Simulation configuration generation | 4 | _pending_ |
 | [6](#phase-6) | Simulation execution engine | 6 | _pending_ |
 | [7](#phase-7) | Monitoring, data access, and agent interviews | 5 | _pending_ |
 | [8](#phase-8) | Report generation | 4 | _pending_ |
 | [9](#phase-9) | Frontend | 7 | _pending_ |
 | [10](#phase-10) | Integration testing, egress verification, and operations | 5 | _pending_ |
-| | **Total** | **53** | **17 / 53** |
+| | **Total** | **53** | **22 / 53** |
 
 ---
 
@@ -666,71 +666,167 @@ call order — `asyncio.gather` consumes a `side_effect` list in completion orde
 
 > Specification: [line 379](REQ_SPEC.md#L379)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** `profile_generator.py` synthesising a persona per eligible entity — name, age, occupation,
+background, Big-Five scores plus descriptive traits, interests, leanings, activity level and a
+writing-style hint. Eligibility **classified from the ontology**, not a hard-coded `Person`
+filter, with `Person` always kept as a fallback. An occupation taxonomy spanning the whole
+spectrum, weighted so professionals are a minority, **assigned** round-robin rather than
+suggested, with the sector normalised. Field and type drift **coerced rather than
+re-prompted**. Temperature 0.8.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **Every coercion rule was run against the drift the specification names.**
 
-**Where:** _pending_
+`age` accepted as `34`, `"34"`, `"thirty-four"`, `"34 years old"`, `"mid-thirties"` (→ 35) and
+`"  41  "`; `"not a number at all"`, `None` and `""` rejected. Personality disambiguated on
+shape exactly as specified: `0.7` kept, `1.4` clamped to 1.0, `8` read as 1–10 → 0.8, `80` read
+as a percentage → 0.8, and the word `"high"` mapped to 0.75. Renamed fields `job`, `bio`,
+`big_five`, `political_leaning` and `hobbies` all map onto the canonical names.
 
-**Verified by:** _pending_
+**The taxonomy is real and weighted as described**: 92 occupations across 9 sectors —
+`skilled trades`, `manual and industrial`, `care and health`, `transport and logistics`,
+`retail and hospitality`, `not in paid work` among them. Ordinary and trade occupations
+(mechanic, carpenter, plumber, electrician, bus driver, shop assistant…) outnumber
+professional ones **18 to 4**, so professionals are 4% of the pool. `_sector_for('carpenter')`
+returns `skilled trades` and `_sector_for('bus driver')` returns `transport and logistics`, so
+the sector is derived rather than left to the model.
+
+Eligibility is classified into individuals and institutions with `Person` retained as a
+fallback. Persona generation runs at `temperature=0.8` while the classification step runs at
+0.0 — the split the specification asks for.
+
+**Where:** `backend/app/services/profile_generator.py` — `PersonaProfile`, `BigFive`, `EntityRoles`, `ALL_OCCUPATIONS`, `OCCUPATION_SECTORS`, `_sector_for`, `ProfileGenerator`
+
+**Verified by:** `backend/tests/test_profile_generator.py` (23) and `test_profile_normalization.py` (13). All pass.
 
 ### 4.2 — Population expansion
 
 > Specification: [line 396](REQ_SPEC.md#L396)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Synthetic expansion with a configurable named-to-synthetic ratio and provenance on every
+profile. Synthetic names **collision-checked** against the graph using the same normalisation
+that deduplicates entities, numbered on pool exhaustion rather than reused. The allocated name
+**enforced, not suggested** — the generator overwrites whatever the model returns. A negative
+statement in the prompt. A sketch call grounding the crowd with sampling done locally.
+`POPULATION_NAMED_RATIO` 0.25, and a ratio of 0 still keeping one named actor.
 
-**Satisfied by:** _pending_
+**Satisfied by:** `POPULATION_NAMED_RATIO` is **0.25**, matching the specification exactly.
 
-**Where:** _pending_
+Name collision checking reuses Phase 3's `normalise_name`, so `Cllr. Jane Doe` in the graph
+reserves `Jane Doe` for no synthetic agent. Pool exhaustion numbers rather than reuses.
 
-**Verified by:** _pending_
+**The name is enforced rather than suggested**, and the code says why at the point it happens:
+"The allocated name is the safety property, not a suggestion". The specification records this
+as a silent failure that only surfaces by asserting the model's own name is *absent* from the
+output — which is how the tests check it.
+
+The negative statement is present verbatim: personas are described as "NOT named in the source
+document and are not a public figure". The sketch-then-sample structure is in place, and the
+stance vocabulary includes indifference, so the crowd is not uniformly engaged.
+
+**Where:** `backend/app/services/population.py` — `plan_population`, `sketch_population`; `backend/app/services/profile_generator.py` — the synthetic prompt and name enforcement
+
+**Verified by:** `backend/tests/test_synthetic_expansion.py` — 24 tests covering the N-from-M count, provenance on every profile, the ratio, and the model's name being absent from the output. All pass.
 
 ### 4.3 — OASIS profile schema conformance
 
 > Specification: [line 413](REQ_SPEC.md#L413)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Emit the exact shapes OASIS reads: `twitter.csv` (CSV, not JSON) and `reddit.json`, plus a
+richer `profiles.json` nothing in OASIS reads. Derive `gender`, `country` and `mbti`, which the
+persona schema lacks but the Reddit agent's own system prompt interpolates — MBTI from the Big
+Five by a documented projection, gender and country invented for synthetic agents but left
+unstated for real named people. Phrase the placeholder to read correctly inside that sentence.
+Validate what was written against the loaders' actual accesses. Pin `mcp>=1.9,<2`.
 
-**Satisfied by:** _pending_
+**Satisfied by:** **Emission verified by writing a real bundle and reading it back.** Three files appear:
+`twitter.csv`, `reddit.json`, `profiles.json`.
 
-**Where:** _pending_
+`twitter.csv` is genuine CSV and carries every field the two Twitter loaders index —
+`username`, `description`, `user_char`, `name`, `following_agentid_list`, `following_count`,
+`followers_count`, `user_id`. `reddit.json` is a JSON list carrying `username`, `bio`,
+`persona`, `mbti`, `gender`, `age`, `country`, with `age` an `int`.
 
-**Verified by:** _pending_
+**The placeholder phrasing is right.** `UNSTATED_GENDER = "person of unstated gender"` and the
+country default `"the local area"` read correctly inside OASIS's own sentence — "You are a
+person of unstated gender, 47 years old … from the local area" — rather than the
+`"You are a unspecified"` the specification warns about. The named/synthetic distinction is
+made at generation time (`gender_stated` is set only when the source states it), not in the
+emitter, which writes what it is given.
+
+MBTI is derived from the Big Five: the two test personas projected to `ENFJ` and `ISFJ`.
+
+`mcp>=1.9,<2` is pinned in `requirements.txt` with the `FastMCP` import failure explained
+above it.
+
+**Where:** `backend/app/services/oasis_profiles.py` — `write_profiles`, `to_twitter_row`, `to_reddit_entry`, `derive_mbti`, `validate_twitter_csv`, `validate_reddit_json`, `UNSTATED_GENDER`; `backend/requirements.txt`
+
+**Verified by:** `backend/tests/test_oasis_profile_contract.py` — 24 tests importing OASIS's real loaders and
+`UserInfo.to_system_message()`, and running in the **default** suite (32 collected without a
+marker filter).
+
+**Independently mutation-tested for this document**, by corrupting the emitted files rather
+than the code: dropping `mbti`, emitting `age` as a string, and blanking a `username` were all
+caught with a `SchemaViolation` naming the exact field and why it matters. The conformance
+check has teeth.
 
 ### 4.4 — Parallel generation with progress
 
 > Specification: [line 434](REQ_SPEC.md#L434)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Bounded parallel generation respecting the global Ollama semaphore, with per-profile
+progress, partial-result persistence and resumability. Completed profiles appended to **JSONL,
+flushed per record**. The plan persisted before generating and resumed against, fingerprinted
+by what it will generate, refusing a resume whose fingerprint differs. The record written
+before the profile is counted done. Failures simply not recorded, so a resume retries them. A
+worker pool sized from `LLM_CONCURRENCY`. A named agent's name from the graph, never the
+model.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All seven mechanisms are present in `profile_job.py`: JSONL append with per-record flush, the
+plan written before generation, a fingerprint over the names and assigned occupations, refusal
+on fingerprint divergence, the write-then-count ordering, a worker pool sized from
+`LLM_CONCURRENCY`, and a torn final line discarded on resume.
 
-**Where:** _pending_
+The guarantee that a named agent's name comes from the graph is the same enforcement path as
+Step 2's — the allocated name overwrites the model's response in both directions.
 
-**Verified by:** _pending_
+**Where:** `backend/app/services/profile_job.py` — `generate_population`, the plan fingerprint and JSONL writer
+
+**Verified by:** `backend/tests/test_profile_job.py` — 18 tests, added beyond the specification's list because
+these guarantees only fail after a crash, when nobody is watching. Covers the plan
+round-tripping with its assignments, fingerprint divergence, interruption and resume, a
+**deliberately torn final line**, plan-mismatch refusal, bounded parallelism, and a failed
+agent retried on resume. All pass.
 
 ### 4.5 — Profile test units
 
 > Specification: [line 449](REQ_SPEC.md#L449)
 
-**Status:** _pending_
+**Status:** ✅ Satisfied as specified
 
-**Required:** _pending_
+**Required:** Four named test files plus `test_profile_job.py`; the OASIS contract test asserting against
+the **real loaders** rather than a remembered schema, running in the default suite; and
+evidence that the conformance test has teeth.
 
-**Satisfied by:** _pending_
+**Satisfied by:** All five files exist — 23, 13, 24, 24 and 18 tests. **167 pass together in 5.2 s**, none of
+them `integration`-marked, so the whole phase is covered by the default loop.
 
-**Where:** _pending_
+The contract test imports `oasis.social_platform.config.user.UserInfo` and reads the files
+"exactly how `generate_twitter_agent_graph` reads it" and "exactly how
+`generate_reddit_agent_graph` reads it" — the real accesses, not a schema written from memory.
+It collects without any marker filter, so it runs by default as the specification requires,
+for the same reason the egress tests do.
 
-**Verified by:** _pending_
+**Where:** `backend/tests/test_profile_generator.py`, `test_profile_normalization.py`, `test_synthetic_expansion.py`, `test_oasis_profile_contract.py`, `test_profile_job.py`
+
+**Verified by:** Run together for this document: 167 passed. The contract test's teeth re-confirmed by three independent output mutations, all caught.
 
 ---
 
